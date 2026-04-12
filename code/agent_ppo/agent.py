@@ -10,19 +10,17 @@ Agent class for Gorge Chase PPO.
 峡谷追猎 PPO Agent 主类。
 """
 
+from agent_ppo.model.model import Model
+from agent_ppo.feature.preprocessor import Preprocessor
+from agent_ppo.feature.definition import ActData, ObsData
+from agent_ppo.conf.conf import Config
+from agent_ppo.algorithm.algorithm import Algorithm
+from kaiwudrl.interface.agent import BaseAgent
+import numpy as np
 import torch
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
-
-import numpy as np
-from kaiwudrl.interface.agent import BaseAgent
-
-from agent_ppo.algorithm.algorithm import Algorithm
-from agent_ppo.conf.conf import Config
-from agent_ppo.feature.definition import ActData, ObsData
-from agent_ppo.feature.preprocessor import Preprocessor
-from agent_ppo.model.model import Model
 
 
 class Agent(BaseAgent):
@@ -36,7 +34,8 @@ class Agent(BaseAgent):
             betas=(0.9, 0.999),
             eps=1e-8,
         )
-        self.algorithm = Algorithm(self.model, self.optimizer, self.device, logger, monitor)
+        self.algorithm = Algorithm(
+            self.model, self.optimizer, self.device, logger, monitor)
         self.preprocessor = Preprocessor()
         self.last_action = -1
         self.logger = logger
@@ -56,7 +55,8 @@ class Agent(BaseAgent):
 
         将原始观测转换为 ObsData 和 remain_info。
         """
-        feature, legal_action, reward = self.preprocessor.feature_process(env_obs, self.last_action)
+        feature, legal_action, reward = self.preprocessor.feature_process(
+            env_obs, self.last_action)
         obs_data = ObsData(
             feature=list(feature),
             legal_action=legal_action,
@@ -108,7 +108,8 @@ class Agent(BaseAgent):
         保存模型检查点。
         """
         model_file_path = f"{path}/model.ckpt-{str(id)}.pkl"
-        state_dict_cpu = {k: v.clone().cpu() for k, v in self.model.state_dict().items()}
+        state_dict_cpu = {k: v.clone().cpu()
+                          for k, v in self.model.state_dict().items()}
         torch.save(state_dict_cpu, model_file_path)
         self.logger.info(f"save model {model_file_path} successfully")
 
@@ -118,7 +119,8 @@ class Agent(BaseAgent):
         加载模型检查点。
         """
         model_file_path = f"{path}/model.ckpt-{str(id)}.pkl"
-        self.model.load_state_dict(torch.load(model_file_path, map_location=self.device))
+        self.model.load_state_dict(torch.load(
+            model_file_path, map_location=self.device))
         self.logger.info(f"load model {model_file_path} successfully")
 
     def action_process(self, act_data, is_stochastic=True):
@@ -138,7 +140,8 @@ class Agent(BaseAgent):
         执行模型推理，返回 logits、value 和动作概率。
         """
         self.model.set_eval_mode()
-        obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
+        obs_tensor = torch.tensor(
+            np.array([feature]), dtype=torch.float32).to(self.device)
 
         with torch.no_grad():
             logits, value = self.model(obs_tensor, inference=True)

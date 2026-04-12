@@ -57,6 +57,45 @@ class Preprocessor:
         # 记录上一帧两只怪距离，用于动态特征
         self.prev_monster_raw_dists = [None, None]
 
+    def _as_float(self, v, default=0.0):
+        """Safe float conversion.
+
+        安全转换为浮点数。
+        """
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _normalize_entity_container(self, data):
+        """Normalize different container shapes to list[dict].
+
+        兼容 list / dict(list) / dict-of-dict / single-dict 等实体容器。
+        """
+        if isinstance(data, list):
+            return data
+
+        if isinstance(data, tuple):
+            return list(data)
+
+        if isinstance(data, dict):
+            # common nested list keys
+            for sub_key in ("items", "list", "data", "entities", "objects", "infos"):
+                sub_data = data.get(sub_key)
+                if isinstance(sub_data, list):
+                    return sub_data
+
+            # dict of entities: {id: {...}, id2: {...}}
+            dict_values = [v for v in data.values() if isinstance(v, dict)]
+            if dict_values and len(dict_values) >= max(1, len(data) // 2):
+                return dict_values
+
+            # single entity dict
+            if "pos" in data or ("x" in data and ("z" in data or "y" in data)):
+                return [data]
+
+        return None
+
     def _get_entity_list(self, frame_state, candidate_keys):
         """Get first existing entity list by keys.
 
@@ -64,9 +103,51 @@ class Preprocessor:
         """
         for key in candidate_keys:
             data = frame_state.get(key)
-            if isinstance(data, list):
-                return data
-        return []
+            entities = self._normalize_entity_container(data)
+            if entities is not None:
+                return entities, key
+        return [], "none"
+
+    def _split_organs_targets(self, frame_state):
+        """Split organs to treasure/buff lists by protocol sub_type.
+
+        按协议从 organs 中拆分目标：sub_type=1 为宝箱，sub_type=2 为加速 buff。
+        """
+        organs = self._normalize_entity_container(frame_state.get("organs"))
+        if organs is None:
+            return [], [], 0
+
+        treasures = []
+        buffs = []
+        for item in organs:
+            if not isinstance(item, dict):
+                continue
+
+            # 协议: status=1 表示可获取
+            if self._as_float(item.get("status", 1), 1) <= 0:
+                continue
+
+            sub_type = int(self._as_float(item.get("sub_type", -1), -1))
+            if sub_type == 1:
+                treasures.append(item)
+            elif sub_type == 2:
+                buffs.append(item)
+
+        return treasures, buffs, len(organs)
+
+    def _is_target_available(self, entity):
+        """Unified availability check for target entities.
+
+        统一目标可用性判定，兼容 is_in_view/is_valid/status 三类字段。
+        """
+        in_view = self._as_float(entity.get("is_in_view", 1), 1) > 0
+        # organs 使用 status=1 表示可获取；旧字段保持兼容
+        is_valid = self._as_float(
+            entity.get("is_valid", entity.get("status", 1)),
+            1,
+        ) > 0
+        status = self._as_float(entity.get("status", 1), 1) > 0
+        return in_view and is_valid and status
 
     def _extract_pos(self, entity):
         """Extract (x, z) from entity dict.
@@ -78,11 +159,14 @@ class Preprocessor:
 
         pos = entity.get("pos")
         if isinstance(pos, dict):
-            if "x" in pos and "z" in pos:
-                return float(pos.get("x", 0.0)), float(pos.get("z", 0.0))
+            if "x" in pos and ("z" in pos or "y" in pos):
+                return float(pos.get("x", 0.0)), float(pos.get("z", pos.get("y", 0.0)))
 
-        if "x" in entity and "z" in entity:
-            return float(entity.get("x", 0.0)), float(entity.get("z", 0.0))
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            return float(pos[0]), float(pos[1])
+
+        if "x" in entity and ("z" in entity or "y" in entity):
+            return float(entity.get("x", 0.0)), float(entity.get("z", entity.get("y", 0.0)))
 
         return None
 
@@ -98,9 +182,7 @@ class Preprocessor:
         for ent in entities:
             if not isinstance(ent, dict):
                 continue
-            if float(ent.get("is_in_view", 1)) <= 0:
-                continue
-            if float(ent.get("is_valid", 1)) <= 0:
+            if not self._is_target_available(ent):
                 continue
 
             pos = self._extract_pos(ent)
@@ -284,15 +366,47 @@ class Preprocessor:
         survival_ratio = step_norm
         progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
 
-        # 新增特征3：最近宝箱目标特征（字段名不一致时自动兜底）
-        treasures = self._get_entity_list(
-            frame_state, ["treasures", "chests", "boxes", "treasure"])
+        # 新增特征3：最近宝箱目标特征
+        # 优先使用协议定义的 organs(sub_type=1)，再回退旧字段名兼容。
+        organs_treasures, organs_buffs, _ = self._split_organs_targets(
+            frame_state)
+        if organs_treasures:
+            treasures = organs_treasures
+        else:
+            treasures, _ = self._get_entity_list(
+                frame_state,
+                [
+                    "treasures",
+                    "treasure",
+                    "treasure_list",
+                    "chests",
+                    "chest",
+                    "chest_list",
+                    "boxes",
+                    "box",
+                ],
+            )
         nearest_treasure_feat = self._nearest_target_feature(
             hero_pos, treasures)
 
-        # 新增特征4：最近buff目标特征（字段名不一致时自动兜底）
-        buffs = self._get_entity_list(
-            frame_state, ["buffs", "speed_buffs", "speedup_buffs"])
+        # 新增特征4：最近buff目标特征
+        # 优先使用协议定义的 organs(sub_type=2)，再回退旧字段名兼容。
+        if organs_buffs:
+            buffs = organs_buffs
+        else:
+            buffs, _ = self._get_entity_list(
+                frame_state,
+                [
+                    "buffs",
+                    "buff",
+                    "buff_list",
+                    "speed_buffs",
+                    "speed_buff",
+                    "speedup_buffs",
+                    "speedup_buff",
+                    "speedup",
+                ],
+            )
         nearest_buff_feat = self._nearest_target_feature(hero_pos, buffs)
 
         # 新增特征5：阶段提示特征（怪物加速前后）
