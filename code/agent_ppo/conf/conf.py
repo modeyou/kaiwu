@@ -13,15 +13,19 @@ Configuration for Gorge Chase PPO.
 
 class Config:
 
-    # Feature dimensions / 特征维度（共40维）
+    # Feature dimensions / 特征维度（共66维）
     FEATURES = [
-        4,
-        5,
-        5,
-        16,
-        16, # 16个合法动作掩码
-        2,
-        
+        4,   # hero_self
+        5,   # monster_1
+        5,   # monster_2
+        16,  # map_local
+        16,  # legal_action（16维动作掩码）
+        2,   # progress
+        4,   # nearest_monster_dyn
+        4,   # second_nearest_monster_dyn
+        4,   # nearest_treasure_target
+        4,   # nearest_buff_target
+        2,   # phase_hint
     ]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)
