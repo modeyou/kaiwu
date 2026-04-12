@@ -11,6 +11,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import numpy as np
+from agent_ppo.conf.conf import Config
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -26,10 +27,6 @@ MAX_BUFF_DURATION = 50.0
 MAP_DIAG = MAP_SIZE * 1.41
 # Max monster speedup step / 怪物加速步数上限
 MAX_MONSTER_SPEEDUP_STEP = 2000.0
-# Danger threshold / 危险距离阈值
-HIGH_DANGER_DIST = 3.0
-# Double-pressure threshold / 双怪压迫阈值
-DOUBLE_PRESSURE_DIST = 8.0
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -48,6 +45,11 @@ class Preprocessor:
         self.max_step = 200
         self.last_min_monster_dist_norm = 0.5
         self.prev_monster_raw_dists = [None, None]
+        self.prev_step_score = None
+        self.prev_treasure_score = None
+        self.prev_min_monster_raw_dist = None
+        self.prev_nearest_treasure_raw_dist = None
+        self.prev_hero_pos = None
         self.reset()
 
     def reset(self):
@@ -56,6 +58,11 @@ class Preprocessor:
         self.last_min_monster_dist_norm = 0.5
         # 记录上一帧两只怪距离，用于动态特征
         self.prev_monster_raw_dists = [None, None]
+        self.prev_step_score = None
+        self.prev_treasure_score = None
+        self.prev_min_monster_raw_dist = None
+        self.prev_nearest_treasure_raw_dist = None
+        self.prev_hero_pos = None
 
     def _as_float(self, v, default=0.0):
         """Safe float conversion.
@@ -199,12 +206,12 @@ class Preprocessor:
                 best_dz = dz
 
         if best_dist is None:
-            return np.zeros(4, dtype=np.float32)
+            return np.zeros(4, dtype=np.float32), None
 
         inv = 1.0 / (best_dist + 1e-6)
         dir_cos = float(np.clip(best_dx * inv, -1.0, 1.0))
         dir_sin = float(np.clip(best_dz * inv, -1.0, 1.0))
-        return np.array([1.0, _norm(best_dist, MAP_DIAG), dir_cos, dir_sin], dtype=np.float32)
+        return np.array([1.0, _norm(best_dist, MAP_DIAG), dir_cos, dir_sin], dtype=np.float32), float(best_dist)
 
     def _parse_monster_speedup_step(self, env_info):
         """Parse monster speedup step from env_info with fallback.
@@ -306,7 +313,7 @@ class Preprocessor:
         nearest_curr_dist, nearest_dist_delta, nearest_ttc_norm = _monster_dyn(
             nearest_slot)
         nearest_danger_flag = float(
-            nearest_curr_dist is not None and nearest_curr_dist <= HIGH_DANGER_DIST)
+            nearest_curr_dist is not None and nearest_curr_dist <= Config.DANGER_DIST_THRESHOLD)
         nearest_monster_dyn_feat = np.array(
             [
                 float(nearest_slot == 0) if nearest_slot is not None else 0.0,
@@ -323,8 +330,8 @@ class Preprocessor:
         double_pressure_flag = float(
             nearest_curr_dist is not None
             and second_curr_dist is not None
-            and nearest_curr_dist <= DOUBLE_PRESSURE_DIST
-            and second_curr_dist <= DOUBLE_PRESSURE_DIST
+            and nearest_curr_dist <= Config.DOUBLE_PRESSURE_DIST_THRESHOLD
+            and second_curr_dist <= Config.DOUBLE_PRESSURE_DIST_THRESHOLD
         )
         second_monster_dyn_feat = np.array(
             [
@@ -386,7 +393,7 @@ class Preprocessor:
                     "box",
                 ],
             )
-        nearest_treasure_feat = self._nearest_target_feature(
+        nearest_treasure_feat, nearest_treasure_raw_dist = self._nearest_target_feature(
             hero_pos, treasures)
 
         # 新增特征4：最近buff目标特征
@@ -407,11 +414,15 @@ class Preprocessor:
                     "speedup",
                 ],
             )
-        nearest_buff_feat = self._nearest_target_feature(hero_pos, buffs)
+        nearest_buff_feat, _ = self._nearest_target_feature(hero_pos, buffs)
 
         # 新增特征5：阶段提示特征（怪物加速前后）
         monster_speedup_step = self._parse_monster_speedup_step(env_info)
-        post_speedup_flag = float(self.step_no >= monster_speedup_step)
+        monster_speedup_by_speed = any(
+            float(m.get("speed", 1)) >= 2.0 for m in monsters if isinstance(m, dict)
+        )
+        post_speedup_flag = float(
+            monster_speedup_by_speed or self.step_no >= monster_speedup_step)
         speedup_eta = max(monster_speedup_step - self.step_no, 0.0)
         phase_feat = np.array(
             [post_speedup_flag, _norm(speedup_eta, MAX_MONSTER_SPEEDUP_STEP)],
@@ -435,20 +446,148 @@ class Preprocessor:
             ]
         )
 
-        # Step reward / 即时奖励
-        cur_min_dist_norm = 1.0
-        for m_feat in monster_feats:
-            if m_feat[0] > 0:
-                cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
+        # Step reward / 即时奖励（前后期分治 + 直接绑定得分增量）
+        step_score = float(env_info.get("step_score", 0.0))
+        treasure_score = float(env_info.get("treasure_score", 0.0))
 
-        survive_reward = 0.01
-        dist_shaping = 0.1 * (cur_min_dist_norm -
-                              self.last_min_monster_dist_norm)
+        # 当前最小怪物距离（原始尺度）
+        valid_dists = [d for d in current_monster_raw_dists if d is not None]
+        cur_min_monster_raw_dist = min(
+            valid_dists) if valid_dists else MAP_DIAG
+        prev_min_monster_raw_dist = (
+            self.prev_min_monster_raw_dist
+            if self.prev_min_monster_raw_dist is not None
+            else cur_min_monster_raw_dist
+        )
 
-        self.last_min_monster_dist_norm = cur_min_dist_norm
-        # 更新上一帧怪物距离，供下一帧计算动态特征
+        # 当前阶段：前期偏拿资源，后期偏保命
+        is_post = bool(post_speedup_flag > 0.5)
+        w_step = Config.SCORE_STEP_WEIGHT_POST if is_post else Config.SCORE_STEP_WEIGHT_PRE
+        w_treasure = Config.SCORE_TREASURE_WEIGHT_POST if is_post else Config.SCORE_TREASURE_WEIGHT_PRE
+        w_survive = Config.SURVIVE_REWARD_POST if is_post else Config.SURVIVE_REWARD_PRE
+        w_dist = Config.DIST_SHAPING_WEIGHT_POST if is_post else Config.DIST_SHAPING_WEIGHT_PRE
+        w_treasure_approach = (
+            Config.TREASURE_APPROACH_WEIGHT_POST if is_post else Config.TREASURE_APPROACH_WEIGHT_PRE
+        )
+
+        # 1) 与官方评分直接绑定：步数分增量 + 宝箱分增量
+        prev_step_score = self.prev_step_score if self.prev_step_score is not None else step_score
+        prev_treasure_score = (
+            self.prev_treasure_score if self.prev_treasure_score is not None else treasure_score
+        )
+        delta_step_score = max(step_score - prev_step_score, 0.0)
+        delta_treasure_score = max(treasure_score - prev_treasure_score, 0.0)
+        step_gain = delta_step_score / Config.STEP_SCORE_UNIT
+        treasure_gain = delta_treasure_score / Config.TREASURE_SCORE_UNIT
+        score_reward = w_step * step_gain + w_treasure * treasure_gain
+
+        # 2) 基础生存奖励
+        survive_reward = w_survive
+
+        # 3) 安全塑形：远离怪物给正反馈，接近给负反馈
+        dist_delta = np.clip(
+            cur_min_monster_raw_dist - prev_min_monster_raw_dist,
+            -Config.DIST_DELTA_CLIP,
+            Config.DIST_DELTA_CLIP,
+        )
+        dist_shaping = w_dist * float(dist_delta)
+
+        # 4) 资源塑形：仅在可见宝箱时计算接近趋势
+        treasure_approach = 0.0
+        prev_treasure_raw_dist = self.prev_nearest_treasure_raw_dist
+        if nearest_treasure_raw_dist is not None and prev_treasure_raw_dist is not None:
+            treasure_delta = np.clip(
+                prev_treasure_raw_dist - nearest_treasure_raw_dist,
+                -Config.TREASURE_APPROACH_DELTA_CLIP,
+                Config.TREASURE_APPROACH_DELTA_CLIP,
+            )
+            treasure_approach = w_treasure_approach * float(treasure_delta)
+
+        # 5) 风险惩罚：后期更重
+        is_high_danger = float(cur_min_monster_raw_dist <=
+                               Config.HIGH_DANGER_DIST_THRESHOLD)
+        danger_penalty = -(
+            Config.HIGH_DANGER_PENALTY_POST if is_post else Config.HIGH_DANGER_PENALTY_PRE
+        ) * is_high_danger
+
+        double_pressure = float(
+            nearest_curr_dist is not None
+            and second_curr_dist is not None
+            and nearest_curr_dist <= Config.DOUBLE_PRESSURE_DIST_THRESHOLD
+            and second_curr_dist <= Config.DOUBLE_PRESSURE_DIST_THRESHOLD
+        )
+        double_pressure_penalty = -Config.DOUBLE_PRESSURE_PENALTY_POST * \
+            double_pressure if is_post else 0.0
+
+        # 6) 闪现价值奖励：奖励“用得值”，惩罚无效交闪
+        flash_reward = 0.0
+        flash_penalty = 0.0
+        if _last_action is not None and int(_last_action) >= 8:
+            prev_danger = prev_min_monster_raw_dist <= Config.DANGER_DIST_THRESHOLD
+            danger_improve = cur_min_monster_raw_dist - prev_min_monster_raw_dist
+            escaped = prev_danger and danger_improve >= Config.FLASH_ESCAPE_MIN_GAIN
+            if escaped:
+                flash_reward += (
+                    Config.FLASH_ESCAPE_REWARD_POST if is_post else Config.FLASH_ESCAPE_REWARD_PRE
+                )
+            if treasure_gain > 0.0:
+                flash_reward += Config.FLASH_TREASURE_GAIN_REWARD
+            if (not escaped) and step_gain <= 0.0 and treasure_gain <= 0.0:
+                flash_penalty -= Config.FLASH_WASTE_PENALTY
+
+        # 7) 无效移动惩罚：减少原地抖动/撞墙行为
+        invalid_move_penalty = 0.0
+        if _last_action is not None and 0 <= int(_last_action) < 8 and self.prev_hero_pos is not None:
+            dx = float(hero_pos["x"] - self.prev_hero_pos[0])
+            dz = float(hero_pos["z"] - self.prev_hero_pos[1])
+            moved = float(np.sqrt(dx * dx + dz * dz))
+            if moved < 0.1:
+                invalid_move_penalty = -Config.INVALID_MOVE_PENALTY
+
+        total_reward = (
+            score_reward
+            + survive_reward
+            + dist_shaping
+            + treasure_approach
+            + danger_penalty
+            + double_pressure_penalty
+            + flash_reward
+            + flash_penalty
+            + invalid_move_penalty
+        )
+        total_reward = float(
+            np.clip(total_reward, Config.REWARD_CLIP_MIN, Config.REWARD_CLIP_MAX))
+
+        reward_info = {
+            # 核心指标：用于监控 reward 是否对齐任务得分。
+            "score_reward": float(score_reward),
+            "step_gain": float(step_gain),
+            "treasure_gain": float(treasure_gain),
+            "survive_reward": float(survive_reward),
+            "dist_shaping": float(dist_shaping),
+            "treasure_approach": float(treasure_approach),
+            "danger_penalty": float(danger_penalty),
+            "double_pressure_penalty": float(double_pressure_penalty),
+            "flash_reward": float(flash_reward),
+            "flash_penalty": float(flash_penalty),
+            "invalid_move_penalty": float(invalid_move_penalty),
+            "is_post": float(is_post),
+            "min_monster_dist": float(cur_min_monster_raw_dist),
+            "nearest_treasure_dist": float(nearest_treasure_raw_dist)
+            if nearest_treasure_raw_dist is not None
+            else -1.0,
+            "total_reward": float(total_reward),
+        }
+
+        # 更新缓存，供下一帧增量奖励计算。
+        self.last_min_monster_dist_norm = _norm(
+            cur_min_monster_raw_dist, MAP_DIAG)
         self.prev_monster_raw_dists = current_monster_raw_dists
+        self.prev_step_score = step_score
+        self.prev_treasure_score = treasure_score
+        self.prev_min_monster_raw_dist = cur_min_monster_raw_dist
+        self.prev_nearest_treasure_raw_dist = nearest_treasure_raw_dist
+        self.prev_hero_pos = (float(hero_pos["x"]), float(hero_pos["z"]))
 
-        reward = [survive_reward + dist_shaping]
-
-        return feature, legal_action, reward
+        reward = [total_reward]
+        return feature, legal_action, reward, reward_info

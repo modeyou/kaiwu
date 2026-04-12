@@ -152,6 +152,25 @@ class EpisodeRunner:
             post_steps = 0
             post_terminated = 0.0
 
+            # 每局任务结果：用于验证 reward 是否真正推动官方得分。
+            result_win = 0.0
+            result_fail = 0.0
+            result_abnormal = 0.0
+
+            # 奖励分项统计：用于验证 reward 设计是否按预期生效。
+            reward_item_sums = {
+                "score_reward": 0.0,
+                "step_gain": 0.0,
+                "treasure_gain": 0.0,
+                "dist_shaping": 0.0,
+                "treasure_approach": 0.0,
+                "danger_penalty": 0.0,
+                "double_pressure_penalty": 0.0,
+                "flash_reward": 0.0,
+                "flash_penalty": 0.0,
+                "invalid_move_penalty": 0.0,
+            }
+
             self.logger.info(f"Episode {self.episode_cnt} start")
 
             while not done:
@@ -234,6 +253,11 @@ class EpisodeRunner:
                 # Step reward / 每步即时奖励
                 reward = np.array(_remain_info.get(
                     "reward", [0.0]), dtype=np.float32)
+                reward_info = _remain_info.get("reward_info", {})
+
+                for key in reward_item_sums:
+                    reward_item_sums[key] += float(reward_info.get(key, 0.0))
+
                 total_reward += float(reward[0])
 
                 # 分阶段奖励统计：观察新增阶段特征是否带来后期收益
@@ -248,13 +272,29 @@ class EpisodeRunner:
                 if done:
                     env_info = env_obs["observation"]["env_info"]
                     total_score = env_info.get("total_score", 0)
+                    in_post_phase = float(next_phase[0]) > 0.5
 
                     if terminated:
-                        final_reward[0] = -10.0
+                        # 阵亡按前后期区分惩罚，后期惩罚更重。
+                        final_reward[0] = (
+                            Config.TERMINAL_FAIL_POST if in_post_phase else Config.TERMINAL_FAIL_PRE
+                        )
                         result_str = "FAIL"
+                        result_fail = 1.0
                     else:
-                        final_reward[0] = 10.0
-                        result_str = "WIN"
+                        # 截断区分正常完成与异常截断。
+                        max_step = int(env_info.get("max_step", self.usr_conf.get(
+                            "env_conf", {}).get("max_step", step)))
+                        finished_steps = int(
+                            env_info.get("finished_steps", step))
+                        if finished_steps >= max_step:
+                            final_reward[0] = Config.TERMINAL_COMPLETE
+                            result_str = "WIN"
+                            result_win = 1.0
+                        else:
+                            final_reward[0] = Config.TERMINAL_ABNORMAL
+                            result_str = "ABNORMAL"
+                            result_abnormal = 1.0
 
                     self.logger.info(
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
@@ -297,6 +337,9 @@ class EpisodeRunner:
                             "reward": round(total_reward + float(final_reward[0]), 4),
                             "episode_steps": step,
                             "episode_cnt": self.episode_cnt,
+                            "result_win": round(result_win, 4),
+                            "result_fail": round(result_fail, 4),
+                            "result_abnormal": round(result_abnormal, 4),
                             "feat_nearest_danger_rate": round(feat_nearest_danger_sum / step_safe, 4),
                             "feat_second_exists_rate": round(feat_second_exists_sum / step_safe, 4),
                             "feat_double_pressure_rate": round(feat_double_pressure_sum / step_safe, 4),
@@ -332,6 +375,26 @@ class EpisodeRunner:
                             "post_reward_mean": round(post_reward_sum / max(post_steps, 1), 4),
                             "post_steps_mean": round(float(post_steps), 4),
                             "post_terminated_rate": round(post_terminated, 4),
+                            "score_reward_mean": round(reward_item_sums["score_reward"] / step_safe, 4),
+                            "step_gain_mean": round(reward_item_sums["step_gain"] / step_safe, 4),
+                            "treasure_gain_mean": round(reward_item_sums["treasure_gain"] / step_safe, 4),
+                            "dist_shaping_mean": round(reward_item_sums["dist_shaping"] / step_safe, 4),
+                            "treasure_approach_mean": round(
+                                reward_item_sums["treasure_approach"] /
+                                step_safe, 4
+                            ),
+                            "danger_penalty_mean": round(reward_item_sums["danger_penalty"] / step_safe, 4),
+                            "double_pressure_penalty_mean": round(
+                                reward_item_sums["double_pressure_penalty"] /
+                                step_safe, 4
+                            ),
+                            "flash_reward_mean": round(reward_item_sums["flash_reward"] / step_safe, 4),
+                            "flash_penalty_mean": round(reward_item_sums["flash_penalty"] / step_safe, 4),
+                            "invalid_move_penalty_mean": round(
+                                reward_item_sums["invalid_move_penalty"] /
+                                step_safe, 4
+                            ),
+                            "terminal_reward": round(float(final_reward[0]), 4),
                         }
                         self.monitor.put_data({os.getpid(): monitor_data})
                         self.last_report_monitor_time = now
