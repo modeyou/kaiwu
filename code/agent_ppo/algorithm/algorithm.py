@@ -142,6 +142,7 @@ class Algorithm:
         old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp(1e-9)
         ratio = new_prob / old_action_prob
         adv = advantage.view(-1, 1)
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)  # 标准 PPO 稳定训练的关键
         clip_mask = (ratio > (1 + self.clip_param)
                      ) | (ratio < (1 - self.clip_param))
         clip_frac = clip_mask.float().mean()

@@ -100,3 +100,29 @@ class Config:
 
     # 训练/验证分离：每 N 局训练插入 1 局验证
     TRAIN_VAL_INTERVAL = 10
+
+    # 受限域随机化：围绕基础配置做小范围随机抖动（仅训练局启用）
+    ENABLE_BOUNDED_DOMAIN_RANDOMIZATION = True
+    MONSTER_INTERVAL_JITTER = 100
+    MONSTER_SPEEDUP_JITTER = 50
+
+    # 宝箱数量随机化（训练局）
+    ENABLE_TREASURE_COUNT_RANDOMIZATION = True
+    TREASURE_COUNT_MIN = 7
+    TREASURE_COUNT_MAX = 10
+
+    # 地图数量随机化（训练局）：每局从 train maps 里采样一个子集
+    ENABLE_MAP_POOL_RANDOMIZATION = True
+    MAP_POOL_SIZE_MIN = 4
+    MAP_POOL_SIZE_MAX = 8
+
+    # buff 刷新时间随机化（训练局）
+    ENABLE_BUFF_COOLDOWN_RANDOMIZATION = True
+    BUFF_COOLDOWN_MIN = 120
+    BUFF_COOLDOWN_MAX = 260
+
+    # 怪物移动速度随机化（训练局）
+    # 仅当 env_conf 中存在 monster_speed 字段时生效；否则仅使用 monster_speedup 随机化。
+    ENABLE_MONSTER_SPEED_RANDOMIZATION = True
+    MONSTER_SPEED_MIN = 1
+    MONSTER_SPEED_MAX = 3

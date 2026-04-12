@@ -40,24 +40,22 @@ class Model(nn.Module):
         self.device = device
 
         input_dim = Config.DIM_OF_OBSERVATION
-        hidden_dim = 128
-        mid_dim = 64
+        backbone_out_dim = 128
         action_num = Config.ACTION_NUM
         value_num = Config.VALUE_NUM
 
         # Shared backbone / 共享骨干网络
         self.backbone = nn.Sequential(
-            make_fc_layer(input_dim, hidden_dim),
-            nn.ReLU(),
-            make_fc_layer(hidden_dim, mid_dim),
-            nn.ReLU(),
+            make_fc_layer(input_dim, 256), nn.LayerNorm(256), nn.ReLU(),
+            make_fc_layer(256, 256), nn.LayerNorm(256), nn.ReLU(),
+            make_fc_layer(256, backbone_out_dim), nn.ReLU(),
         )
 
         # Actor head / 策略头
-        self.actor_head = make_fc_layer(mid_dim, action_num)
+        self.actor_head = make_fc_layer(backbone_out_dim, action_num)
 
         # Critic head / 价值头
-        self.critic_head = make_fc_layer(mid_dim, value_num)
+        self.critic_head = make_fc_layer(backbone_out_dim, value_num)
 
     def forward(self, obs, inference=False):
         hidden = self.backbone(obs)

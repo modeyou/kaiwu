@@ -13,6 +13,7 @@ Training workflow for Gorge Chase PPO.
 import os
 import time
 import copy
+import random
 
 import numpy as np
 from agent_ppo.conf.conf import Config
@@ -67,6 +68,46 @@ class EpisodeRunner:
             int(getattr(Config, "TRAIN_VAL_INTERVAL", 10)), 1)
         self.last_report_monitor_time = 0
         self.last_get_training_metrics_time = 0
+        self.enable_bounded_random = bool(
+            getattr(Config, "ENABLE_BOUNDED_DOMAIN_RANDOMIZATION", True)
+        )
+        self.monster_interval_jitter = max(
+            int(getattr(Config, "MONSTER_INTERVAL_JITTER", 50)), 0
+        )
+        self.monster_speedup_jitter = max(
+            int(getattr(Config, "MONSTER_SPEEDUP_JITTER", 50)), 0
+        )
+        self.enable_treasure_count_randomization = bool(
+            getattr(Config, "ENABLE_TREASURE_COUNT_RANDOMIZATION", True)
+        )
+        self.treasure_count_min = int(
+            getattr(Config, "TREASURE_COUNT_MIN", 0)
+        )
+        self.treasure_count_max = int(
+            getattr(Config, "TREASURE_COUNT_MAX", 10)
+        )
+        self.enable_map_pool_randomization = bool(
+            getattr(Config, "ENABLE_MAP_POOL_RANDOMIZATION", True)
+        )
+        self.map_pool_size_min = int(getattr(Config, "MAP_POOL_SIZE_MIN", 1))
+        self.map_pool_size_max = int(getattr(Config, "MAP_POOL_SIZE_MAX", 10))
+        self.enable_buff_cooldown_randomization = bool(
+            getattr(Config, "ENABLE_BUFF_COOLDOWN_RANDOMIZATION", True)
+        )
+        self.buff_cooldown_min = int(getattr(Config, "BUFF_COOLDOWN_MIN", 1))
+        self.buff_cooldown_max = int(getattr(Config, "BUFF_COOLDOWN_MAX", 500))
+        self.enable_monster_speed_randomization = bool(
+            getattr(Config, "ENABLE_MONSTER_SPEED_RANDOMIZATION", True)
+        )
+        self.monster_speed_min = int(getattr(Config, "MONSTER_SPEED_MIN", 1))
+        self.monster_speed_max = int(getattr(Config, "MONSTER_SPEED_MAX", 3))
+        self._warned_monster_speed_missing = False
+
+        # 基于验证集的最佳模型跟踪
+        self.best_val_total_score = float("-inf")
+        self.best_val_steps = float("-inf")
+        self.best_val_reward = float("-inf")
+        self.best_val_episode = -1
 
         # 训练/验证配置拆分：train 用前 80%，val 用后 20% 地图
         self.train_usr_conf, self.val_usr_conf = self._build_train_val_confs(
@@ -148,6 +189,150 @@ class EpisodeRunner:
         expected_val_cnt = self.train_episode_cnt // self.val_interval
         return self.val_episode_cnt < expected_val_cnt
 
+    def _sample_bounded(self, base_value, jitter, low, high):
+        """Sample an integer around base_value within [low, high].
+
+        围绕基础值在合法区间内采样整数，用于受限域随机化。
+        """
+        base = int(base_value)
+        if jitter <= 0:
+            return max(low, min(high, base))
+        left = max(low, base - jitter)
+        right = min(high, base + jitter)
+        if left > right:
+            return max(low, min(high, base))
+        return random.randint(left, right)
+
+    def _build_episode_conf(self, is_val):
+        """Build per-episode env config with optional bounded randomization.
+
+        构造每局环境配置：验证局保持固定，训练局可启用小范围随机。
+        """
+        base_conf = self.val_usr_conf if is_val else self.train_usr_conf
+        run_conf = copy.deepcopy(base_conf)
+        if is_val or (not self.enable_bounded_random):
+            return run_conf
+
+        env_conf = run_conf.setdefault("env_conf", {})
+
+        # 地图数量随机化：每局从当前 train maps 中随机采样一个子集
+        map_pool = list(env_conf.get("map", []))
+        if self.enable_map_pool_randomization and map_pool:
+            max_pool = min(max(1, self.map_pool_size_max), len(map_pool))
+            min_pool = min(max(1, self.map_pool_size_min), max_pool)
+            sampled_pool_size = random.randint(min_pool, max_pool)
+            env_conf["map"] = random.sample(map_pool, sampled_pool_size)
+            env_conf["map_random"] = True
+
+        # 宝箱数量随机化：控制在协议允许范围 [0, 10]
+        sampled_treasure_count = int(env_conf.get("treasure_count", 10))
+        if self.enable_treasure_count_randomization:
+            trea_min = max(0, min(10, self.treasure_count_min))
+            trea_max = max(0, min(10, self.treasure_count_max))
+            if trea_min > trea_max:
+                trea_min, trea_max = trea_max, trea_min
+            sampled_treasure_count = random.randint(trea_min, trea_max)
+            env_conf["treasure_count"] = sampled_treasure_count
+
+        # buff 刷新时间随机化：协议范围 [1, 500]
+        sampled_buff_cooldown = int(env_conf.get("buff_cooldown", 200))
+        if self.enable_buff_cooldown_randomization:
+            cool_min = max(1, min(500, self.buff_cooldown_min))
+            cool_max = max(1, min(500, self.buff_cooldown_max))
+            if cool_min > cool_max:
+                cool_min, cool_max = cool_max, cool_min
+            sampled_buff_cooldown = random.randint(cool_min, cool_max)
+            env_conf["buff_cooldown"] = sampled_buff_cooldown
+
+        base_interval = env_conf.get("monster_interval", 300)
+        if int(base_interval) <= 0:
+            base_interval = 300
+        sampled_interval = self._sample_bounded(
+            base_value=base_interval,
+            jitter=self.monster_interval_jitter,
+            low=11,
+            high=2000,
+        )
+
+        base_speedup = env_conf.get("monster_speedup", 500)
+        if int(base_speedup) <= 0:
+            base_speedup = 500
+        sampled_speedup = self._sample_bounded(
+            base_value=base_speedup,
+            jitter=self.monster_speedup_jitter,
+            low=1,
+            high=2000,
+        )
+
+        env_conf["monster_interval"] = sampled_interval
+        env_conf["monster_speedup"] = sampled_speedup
+
+        # 怪物移动速度随机化：仅当环境配置支持 monster_speed 字段时生效
+        sampled_monster_speed = None
+        if self.enable_monster_speed_randomization:
+            if "monster_speed" in env_conf:
+                spd_min = max(1, self.monster_speed_min)
+                spd_max = max(1, self.monster_speed_max)
+                if spd_min > spd_max:
+                    spd_min, spd_max = spd_max, spd_min
+                sampled_monster_speed = random.randint(spd_min, spd_max)
+                env_conf["monster_speed"] = sampled_monster_speed
+            elif not self._warned_monster_speed_missing:
+                self.logger.info(
+                    "[TRAIN randomization] monster_speed randomization enabled but env_conf has no monster_speed field; "
+                    "fallback to monster_speedup randomization"
+                )
+                self._warned_monster_speed_missing = True
+
+        sampled_map_cnt = len(env_conf.get("map", []))
+        self.logger.info(
+            f"[TRAIN randomization] map_cnt={sampled_map_cnt} treasure_count={sampled_treasure_count} "
+            f"buff_cooldown={sampled_buff_cooldown} "
+            f"monster_interval={sampled_interval} monster_speedup={sampled_speedup} "
+            f"monster_speed={sampled_monster_speed if sampled_monster_speed is not None else 'NA'} "
+            f"(base_interval={base_interval}, base_speedup={base_speedup})"
+        )
+        return run_conf
+
+    def _try_save_best_val_model(self, val_metrics):
+        """Save best-val checkpoint when validation metrics improve.
+
+        当验证指标刷新历史最优时，保存 best_val 检查点。
+        """
+        val_total_score = float(val_metrics.get("total_score", 0.0))
+        val_steps = float(val_metrics.get("steps", 0.0))
+        val_reward = float(val_metrics.get("reward", 0.0))
+
+        improved = (
+            (val_total_score > self.best_val_total_score)
+            or (
+                val_total_score == self.best_val_total_score
+                and val_steps > self.best_val_steps
+            )
+            or (
+                val_total_score == self.best_val_total_score
+                and val_steps == self.best_val_steps
+                and val_reward > self.best_val_reward
+            )
+        )
+        if not improved:
+            return
+
+        self.best_val_total_score = val_total_score
+        self.best_val_steps = val_steps
+        self.best_val_reward = val_reward
+        self.best_val_episode = self.episode_cnt
+
+        try:
+            # 保留稳定别名，便于随时加载当前最优。
+            self.agent.save_model(id="best_val")
+            self.logger.info(
+                f"[VAL BEST] episode:{self.episode_cnt} score:{val_total_score:.1f} "
+                f"steps:{val_steps:.1f} reward:{val_reward:.3f} saved_id:best_val"
+            )
+        except (OSError, RuntimeError, ValueError) as err:
+            self.logger.error(f"[VAL BEST] save failed: {err}")
+
     def _prefix_metrics(self, metrics, prefix):
         """Add mode prefix for monitor keys.
 
@@ -163,7 +348,7 @@ class EpisodeRunner:
         while True:
             # 决定当前局模式：训练 or 验证
             is_val = self._should_run_val()
-            run_conf = self.val_usr_conf if is_val else self.train_usr_conf
+            run_conf = self._build_episode_conf(is_val)
             mode_str = "VAL" if is_val else "TRAIN"
             mode_prefix = "val" if is_val else "train"
 
@@ -243,7 +428,13 @@ class EpisodeRunner:
 
             while not done:
                 # Predict action / Agent 推理（随机采样）
-                act_data = self.agent.predict(list_obs_data=[obs_data])[0]
+                pred_list = self.agent.predict(list_obs_data=[obs_data])
+                if not pred_list:
+                    self.logger.error(
+                        f"[{mode_str}] predict returned empty result, break current episode"
+                    )
+                    break
+                act_data = pred_list[0]
                 # 训练局走随机采样，验证局走贪心动作
                 act = self.agent.action_process(
                     act_data, is_stochastic=(not is_val))
@@ -420,51 +611,56 @@ class EpisodeRunner:
                         collector[-1].reward = collector[-1].reward + \
                             final_reward
 
+                    episode_metrics = {
+                        "reward": round(total_reward + float(final_reward[0]), 4),
+                        "total_score": round(final_total_score, 4),
+                        "step_score": round(final_step_score, 4),
+                        "treasure_score": round(final_treasure_score, 4),
+                        "treasures": round(final_treasures, 4),
+                        "steps": round(float(step), 4),
+                        "speedup_reached": round(speedup_reached, 4),
+                        "pre_steps": round(pre_steps, 4),
+                        "post_steps": round(post_steps, 4),
+                        "pre_total_r": round(pre_total_r, 4),
+                        "post_total_r": round(post_total_r, 4),
+                        "pre_shaped_r": round(pre_shaped_r, 4),
+                        "post_shaped_r": round(post_shaped_r, 4),
+                        "pre_step_gain": round(pre_step_gain, 4),
+                        "post_step_gain": round(post_step_gain, 4),
+                        "pre_trea_gain": round(pre_trea_gain, 4),
+                        "post_trea_gain": round(post_trea_gain, 4),
+                        "pre_total_gain": round(pre_step_gain + pre_trea_gain, 4),
+                        "post_total_gain": round(post_step_gain + post_trea_gain, 4),
+                        "pre_terminal": round(pre_terminal, 4),
+                        "post_terminal": round(post_terminal, 4),
+                        "post_terminated": round(post_terminated, 4),
+                        "terminated_rate": round(terminated_rate, 4),
+                        "completed_rate": round(completed_rate, 4),
+                        "abnormal_trunc": round(abnormal_trunc, 4),
+                        "final_danger": round(final_danger, 4),
+                        "final_trea_dist": round(final_trea_dist, 4),
+                        "flash_count": round(flash_count, 4),
+                        "last_flash_used": round(last_flash_used, 4),
+                        "last_flash_ready": round(last_flash_ready, 4),
+                        "last_flash_legal": round(last_flash_legal, 4),
+                        "final_visible_tre": round(final_visible_tre, 4),
+                        "dist_shaping_mean": round(sum_dist_shaping / max(step, 1), 4),
+                        "treasure_approach_mean": round(sum_treasure_approach / max(step, 1), 4),
+                        "danger_penalty_mean": round(sum_danger_penalty / max(step, 1), 4),
+                        "flash_reward_mean": round(sum_flash_reward / max(step, 1), 4),
+                        "flash_penalty_mean": round(sum_flash_penalty / max(step, 1), 4),
+                    }
+
                     # Monitor report / 监控上报
                     if self.monitor:
-                        episode_metrics = {
-                            "reward": round(total_reward + float(final_reward[0]), 4),
-                            "total_score": round(final_total_score, 4),
-                            "step_score": round(final_step_score, 4),
-                            "treasure_score": round(final_treasure_score, 4),
-                            "treasures": round(final_treasures, 4),
-                            "steps": round(float(step), 4),
-                            "speedup_reached": round(speedup_reached, 4),
-                            "pre_steps": round(pre_steps, 4),
-                            "post_steps": round(post_steps, 4),
-                            "pre_total_r": round(pre_total_r, 4),
-                            "post_total_r": round(post_total_r, 4),
-                            "pre_shaped_r": round(pre_shaped_r, 4),
-                            "post_shaped_r": round(post_shaped_r, 4),
-                            "pre_step_gain": round(pre_step_gain, 4),
-                            "post_step_gain": round(post_step_gain, 4),
-                            "pre_trea_gain": round(pre_trea_gain, 4),
-                            "post_trea_gain": round(post_trea_gain, 4),
-                            "pre_total_gain": round(pre_step_gain + pre_trea_gain, 4),
-                            "post_total_gain": round(post_step_gain + post_trea_gain, 4),
-                            "pre_terminal": round(pre_terminal, 4),
-                            "post_terminal": round(post_terminal, 4),
-                            "post_terminated": round(post_terminated, 4),
-                            "terminated_rate": round(terminated_rate, 4),
-                            "completed_rate": round(completed_rate, 4),
-                            "abnormal_trunc": round(abnormal_trunc, 4),
-                            "final_danger": round(final_danger, 4),
-                            "final_trea_dist": round(final_trea_dist, 4),
-                            "flash_count": round(flash_count, 4),
-                            "last_flash_used": round(last_flash_used, 4),
-                            "last_flash_ready": round(last_flash_ready, 4),
-                            "last_flash_legal": round(last_flash_legal, 4),
-                            "final_visible_tre": round(final_visible_tre, 4),
-                            "dist_shaping_mean": round(sum_dist_shaping / max(step, 1), 4),
-                            "treasure_approach_mean": round(sum_treasure_approach / max(step, 1), 4),
-                            "danger_penalty_mean": round(sum_danger_penalty / max(step, 1), 4),
-                            "flash_reward_mean": round(sum_flash_reward / max(step, 1), 4),
-                            "flash_penalty_mean": round(sum_flash_penalty / max(step, 1), 4),
-                        }
                         self.monitor.put_data(
                             {os.getpid(): self._prefix_metrics(
                                 episode_metrics, mode_prefix)}
                         )
+
+                    # 验证局触发 best model 保存（基于 val_total_score/val_steps/reward）
+                    if is_val:
+                        self._try_save_best_val_model(episode_metrics)
 
                     if collector and (not is_val):
                         collector = sample_process(collector)
