@@ -97,3 +97,6 @@ class Config:
     # 单步奖励裁剪，增强训练稳定性
     REWARD_CLIP_MIN = -3.0
     REWARD_CLIP_MAX = 3.0
+
+    # 训练/验证分离：每 N 局训练插入 1 局验证
+    TRAIN_VAL_INTERVAL = 10

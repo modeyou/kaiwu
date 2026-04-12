@@ -29,7 +29,8 @@ class Algorithm:
         self.device = device
         self.model = model
         self.optimizer = optimizer
-        self.parameters = [p for pg in self.optimizer.param_groups for p in pg["params"]]
+        self.parameters = [
+            p for pg in self.optimizer.param_groups for p in pg["params"]]
         self.logger = logger
         self.monitor = monitor
 
@@ -48,13 +49,20 @@ class Algorithm:
         训练入口：对一批 SampleData 执行 PPO 更新。
         """
         obs = torch.stack([f.obs for f in list_sample_data]).to(self.device)
-        legal_action = torch.stack([f.legal_action for f in list_sample_data]).to(self.device)
-        act = torch.stack([f.act for f in list_sample_data]).to(self.device).view(-1, 1)
-        old_prob = torch.stack([f.prob for f in list_sample_data]).to(self.device)
-        reward = torch.stack([f.reward for f in list_sample_data]).to(self.device)
-        advantage = torch.stack([f.advantage for f in list_sample_data]).to(self.device)
-        old_value = torch.stack([f.value for f in list_sample_data]).to(self.device)
-        reward_sum = torch.stack([f.reward_sum for f in list_sample_data]).to(self.device)
+        legal_action = torch.stack(
+            [f.legal_action for f in list_sample_data]).to(self.device)
+        act = torch.stack([f.act for f in list_sample_data]
+                          ).to(self.device).view(-1, 1)
+        old_prob = torch.stack(
+            [f.prob for f in list_sample_data]).to(self.device)
+        reward = torch.stack(
+            [f.reward for f in list_sample_data]).to(self.device)
+        advantage = torch.stack(
+            [f.advantage for f in list_sample_data]).to(self.device)
+        old_value = torch.stack(
+            [f.value for f in list_sample_data]).to(self.device)
+        reward_sum = torch.stack(
+            [f.reward_sum for f in list_sample_data]).to(self.device)
 
         self.model.set_train_mode()
         self.optimizer.zero_grad()
@@ -74,24 +82,35 @@ class Algorithm:
         )
 
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters, Config.GRAD_CLIP_RANGE)
+        # 裁剪前梯度范数：用于监控训练是否过激。
+        grad_clip_norm = torch.nn.utils.clip_grad_norm_(
+            self.parameters, Config.GRAD_CLIP_RANGE
+        )
         self.optimizer.step()
         self.train_step += 1
 
         now = time.time()
         if now - self.last_report_monitor_time >= 60:
             results = {
+                "cum_reward": round(reward.mean().item(), 4),
                 "total_loss": round(total_loss.item(), 4),
-                "value_loss": round(info_list[0].item(), 4),
-                "policy_loss": round(info_list[1].item(), 4),
-                "entropy_loss": round(info_list[2].item(), 4),
-                "reward": round(reward.mean().item(), 4),
+                "value_loss": round(info_list["value_loss"].item(), 4),
+                "policy_loss": round(info_list["policy_loss"].item(), 4),
+                "entropy_loss": round(info_list["entropy_loss"].item(), 4),
+                "grad_clip_norm": round(float(grad_clip_norm), 4),
+                "clip_frac": round(info_list["clip_frac"].item(), 4),
+                "explained_var": round(info_list["explained_var"].item(), 4),
+                "adv_mean": round(advantage.mean().item(), 4),
+                "ret_mean": round(reward_sum.mean().item(), 4),
             }
             self.logger.info(
+                f"[train] cum_reward:{results['cum_reward']} "
                 f"[train] total_loss:{results['total_loss']} "
                 f"policy_loss:{results['policy_loss']} "
                 f"value_loss:{results['value_loss']} "
-                f"entropy:{results['entropy_loss']}"
+                f"entropy:{results['entropy_loss']} "
+                f"grad_norm:{results['grad_clip_norm']} "
+                f"clip_frac:{results['clip_frac']}"
             )
             if self.monitor:
                 self.monitor.put_data({os.getpid(): results})
@@ -117,13 +136,18 @@ class Algorithm:
         prob_dist = self._masked_softmax(logits, legal_action)
 
         # Policy loss (PPO Clip) / 策略损失
-        one_hot = torch.nn.functional.one_hot(old_action[:, 0].long(), self.label_size).float()
+        one_hot = torch.nn.functional.one_hot(
+            old_action[:, 0].long(), self.label_size).float()
         new_prob = (one_hot * prob_dist).sum(1, keepdim=True)
         old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp(1e-9)
         ratio = new_prob / old_action_prob
         adv = advantage.view(-1, 1)
+        clip_mask = (ratio > (1 + self.clip_param)
+                     ) | (ratio < (1 - self.clip_param))
+        clip_frac = clip_mask.float().mean()
         policy_loss1 = -ratio * adv
-        policy_loss2 = -ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
+        policy_loss2 = - \
+            ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
         policy_loss = torch.maximum(policy_loss1, policy_loss2).mean()
 
         # Value loss (Clipped) / 价值损失
@@ -140,12 +164,25 @@ class Algorithm:
         )
 
         # Entropy loss / 熵损失
-        entropy_loss = (-prob_dist * torch.log(prob_dist.clamp(1e-9, 1))).sum(1).mean()
+        entropy_loss = (-prob_dist *
+                        torch.log(prob_dist.clamp(1e-9, 1))).sum(1).mean()
 
         # Total loss / 总损失
-        total_loss = self.vf_coef * value_loss + policy_loss - self.var_beta * entropy_loss
+        total_loss = self.vf_coef * value_loss + \
+            policy_loss - self.var_beta * entropy_loss
 
-        return total_loss, [value_loss, policy_loss, entropy_loss]
+        # 解释方差：衡量 value 对 return 的拟合质量。
+        var_ret = torch.var(tdret, unbiased=False)
+        explained_var = 1.0 - \
+            torch.var(tdret - vp, unbiased=False) / (var_ret + 1e-8)
+
+        return total_loss, {
+            "value_loss": value_loss,
+            "policy_loss": policy_loss,
+            "entropy_loss": entropy_loss,
+            "clip_frac": clip_frac,
+            "explained_var": explained_var,
+        }
 
     def _masked_softmax(self, logits, legal_action):
         """Softmax with legal action masking (suppress illegal actions).

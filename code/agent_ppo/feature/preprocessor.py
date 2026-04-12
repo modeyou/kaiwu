@@ -237,7 +237,9 @@ class Preprocessor:
         frame_state = observation["frame_state"]
         env_info = observation["env_info"]
         map_info = observation["map_info"]
-        legal_act_raw = observation["legal_action"]
+        # 协议兼容：同时支持 legal_action 与 legal_act 两种键名
+        legal_act_raw = observation.get(
+            "legal_action", observation.get("legal_act", []))
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)

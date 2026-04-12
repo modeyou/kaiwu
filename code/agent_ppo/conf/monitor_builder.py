@@ -14,6 +14,71 @@ Monitor panel configuration builder for Gorge Chase.
 from kaiwudrl.common.monitor.monitor_config_builder import MonitorConfigBuilder
 
 
+def _add_episode_group(monitor, group_name, group_name_en, prefix):
+    """Add train/val episode metric group with a fixed field schema.
+
+    按给定前缀（train/val）添加同构指标面板。
+    """
+    p = f"{prefix}_"
+    return (
+        monitor.add_group(group_name=group_name, group_name_en=group_name_en)
+        .add_panel(name="基础结果", name_en=f"{prefix}_basic", type="line")
+        .add_metric(metrics_name=f"{p}reward", expr=f"avg({p}reward{{}})")
+        .add_metric(metrics_name=f"{p}total_score", expr=f"avg({p}total_score{{}})")
+        .add_metric(metrics_name=f"{p}step_score", expr=f"avg({p}step_score{{}})")
+        .add_metric(metrics_name=f"{p}treasure_score", expr=f"avg({p}treasure_score{{}})")
+        .add_metric(metrics_name=f"{p}treasures", expr=f"avg({p}treasures{{}})")
+        .add_metric(metrics_name=f"{p}steps", expr=f"avg({p}steps{{}})")
+        .end_panel()
+        .add_panel(name="阶段步数与总奖励", name_en=f"{prefix}_phase_steps_reward", type="line")
+        .add_metric(metrics_name=f"{p}speedup_reached", expr=f"avg({p}speedup_reached{{}})")
+        .add_metric(metrics_name=f"{p}pre_steps", expr=f"avg({p}pre_steps{{}})")
+        .add_metric(metrics_name=f"{p}post_steps", expr=f"avg({p}post_steps{{}})")
+        .add_metric(metrics_name=f"{p}pre_total_r", expr=f"avg({p}pre_total_r{{}})")
+        .add_metric(metrics_name=f"{p}post_total_r", expr=f"avg({p}post_total_r{{}})")
+        .end_panel()
+        .add_panel(name="阶段塑形奖励", name_en=f"{prefix}_phase_shaped", type="line")
+        .add_metric(metrics_name=f"{p}pre_shaped_r", expr=f"avg({p}pre_shaped_r{{}})")
+        .add_metric(metrics_name=f"{p}post_shaped_r", expr=f"avg({p}post_shaped_r{{}})")
+        .end_panel()
+        .add_panel(name="阶段得分增量", name_en=f"{prefix}_phase_gain", type="line")
+        .add_metric(metrics_name=f"{p}pre_step_gain", expr=f"avg({p}pre_step_gain{{}})")
+        .add_metric(metrics_name=f"{p}post_step_gain", expr=f"avg({p}post_step_gain{{}})")
+        .add_metric(metrics_name=f"{p}pre_trea_gain", expr=f"avg({p}pre_trea_gain{{}})")
+        .add_metric(metrics_name=f"{p}post_trea_gain", expr=f"avg({p}post_trea_gain{{}})")
+        .add_metric(metrics_name=f"{p}pre_total_gain", expr=f"avg({p}pre_total_gain{{}})")
+        .add_metric(metrics_name=f"{p}post_total_gain", expr=f"avg({p}post_total_gain{{}})")
+        .end_panel()
+        .add_panel(name="终局与结果", name_en=f"{prefix}_terminal_result", type="line")
+        .add_metric(metrics_name=f"{p}pre_terminal", expr=f"avg({p}pre_terminal{{}})")
+        .add_metric(metrics_name=f"{p}post_terminal", expr=f"avg({p}post_terminal{{}})")
+        .add_metric(metrics_name=f"{p}post_terminated", expr=f"avg({p}post_terminated{{}})")
+        .add_metric(metrics_name=f"{p}terminated_rate", expr=f"avg({p}terminated_rate{{}})")
+        .add_metric(metrics_name=f"{p}completed_rate", expr=f"avg({p}completed_rate{{}})")
+        .add_metric(metrics_name=f"{p}abnormal_trunc", expr=f"avg({p}abnormal_trunc{{}})")
+        .end_panel()
+        .add_panel(name="末帧状态", name_en=f"{prefix}_final_state", type="line")
+        .add_metric(metrics_name=f"{p}final_danger", expr=f"avg({p}final_danger{{}})")
+        .add_metric(metrics_name=f"{p}final_trea_dist", expr=f"avg({p}final_trea_dist{{}})")
+        .add_metric(metrics_name=f"{p}final_visible_tre", expr=f"avg({p}final_visible_tre{{}})")
+        .end_panel()
+        .add_panel(name="闪现行为", name_en=f"{prefix}_flash", type="line")
+        .add_metric(metrics_name=f"{p}flash_count", expr=f"avg({p}flash_count{{}})")
+        .add_metric(metrics_name=f"{p}last_flash_used", expr=f"avg({p}last_flash_used{{}})")
+        .add_metric(metrics_name=f"{p}last_flash_ready", expr=f"avg({p}last_flash_ready{{}})")
+        .add_metric(metrics_name=f"{p}last_flash_legal", expr=f"avg({p}last_flash_legal{{}})")
+        .end_panel()
+        .add_panel(name="奖励诊断", name_en=f"{prefix}_reward_diag", type="line")
+        .add_metric(metrics_name=f"{p}dist_shaping_mean", expr=f"avg({p}dist_shaping_mean{{}})")
+        .add_metric(metrics_name=f"{p}treasure_approach_mean", expr=f"avg({p}treasure_approach_mean{{}})")
+        .add_metric(metrics_name=f"{p}danger_penalty_mean", expr=f"avg({p}danger_penalty_mean{{}})")
+        .add_metric(metrics_name=f"{p}flash_reward_mean", expr=f"avg({p}flash_reward_mean{{}})")
+        .add_metric(metrics_name=f"{p}flash_penalty_mean", expr=f"avg({p}flash_penalty_mean{{}})")
+        .end_panel()
+        .end_group()
+    )
+
+
 def build_monitor():
     """
     # This function is used to create monitoring panel configurations for custom indicators.
@@ -21,289 +86,38 @@ def build_monitor():
     """
     monitor = MonitorConfigBuilder()
 
-    config_dict = (
+    monitor = (
         monitor.title("峡谷追猎")
-        .add_group(
-            group_name="算法指标",
-            group_name_en="algorithm",
-        )
-        .add_panel(
-            name="累积回报",
-            name_en="reward",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="reward",
-            expr="avg(reward{})",
-        )
+        .add_group(group_name="算法指标", group_name_en="algorithm")
+        .add_panel(name="损失与回报", name_en="loss_reward", type="line")
+        .add_metric(metrics_name="cum_reward", expr="avg(cum_reward{})")
+        .add_metric(metrics_name="total_loss", expr="avg(total_loss{})")
+        .add_metric(metrics_name="value_loss", expr="avg(value_loss{})")
+        .add_metric(metrics_name="policy_loss", expr="avg(policy_loss{})")
+        .add_metric(metrics_name="entropy_loss", expr="avg(entropy_loss{})")
         .end_panel()
-        .add_panel(
-            name="总损失",
-            name_en="total_loss",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="total_loss",
-            expr="avg(total_loss{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="价值损失",
-            name_en="value_loss",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="value_loss",
-            expr="avg(value_loss{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="策略损失",
-            name_en="policy_loss",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="policy_loss",
-            expr="avg(policy_loss{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="熵损失",
-            name_en="entropy_loss",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="entropy_loss",
-            expr="avg(entropy_loss{})",
-        )
+        .add_panel(name="稳定性与拟合", name_en="stability_fit", type="line")
+        .add_metric(metrics_name="grad_clip_norm", expr="avg(grad_clip_norm{})")
+        .add_metric(metrics_name="clip_frac", expr="avg(clip_frac{})")
+        .add_metric(metrics_name="explained_var", expr="avg(explained_var{})")
+        .add_metric(metrics_name="adv_mean", expr="avg(adv_mean{})")
+        .add_metric(metrics_name="ret_mean", expr="avg(ret_mean{})")
         .end_panel()
         .end_group()
-        .add_group(
-            name="对局结果占比",
-            name_en="episode_result",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="result_win",
-            expr="avg(result_win{})",
-        )
-        .add_metric(
-            metrics_name="result_fail",
-            expr="avg(result_fail{})",
-        )
-        .add_metric(
-            metrics_name="result_abnormal",
-            expr="avg(result_abnormal{})",
-        )
-        .end_panel()
-        .end_group()
-        .add_group(
-            group_name="奖励分项",
-            group_name_en="reward_decomposition",
-        )
-        .add_panel(
-            name="核心增量项",
-            name_en="reward_core",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="score_reward_mean",
-            expr="avg(score_reward_mean{})",
-        )
-        .add_metric(
-            metrics_name="step_gain_mean",
-            expr="avg(step_gain_mean{})",
-        )
-        .add_metric(
-            metrics_name="treasure_gain_mean",
-            expr="avg(treasure_gain_mean{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="塑形与风险项",
-            name_en="reward_shaping_risk",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="dist_shaping_mean",
-            expr="avg(dist_shaping_mean{})",
-        )
-        .add_metric(
-            metrics_name="treasure_approach_mean",
-            expr="avg(treasure_approach_mean{})",
-        )
-        .add_metric(
-            metrics_name="danger_penalty_mean",
-            expr="avg(danger_penalty_mean{})",
-        )
-        .add_metric(
-            metrics_name="double_pressure_penalty_mean",
-            expr="avg(double_pressure_penalty_mean{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="闪现与终局项",
-            name_en="reward_flash_terminal",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="flash_reward_mean",
-            expr="avg(flash_reward_mean{})",
-        )
-        .add_metric(
-            metrics_name="flash_penalty_mean",
-            expr="avg(flash_penalty_mean{})",
-        )
-        .add_metric(
-            metrics_name="invalid_move_penalty_mean",
-            expr="avg(invalid_move_penalty_mean{})",
-        )
-        .add_metric(
-            metrics_name="terminal_reward",
-            expr="avg(terminal_reward{})",
-        )
-        .end_panel()
-        .end_group()
-        .add_group(
-            group_name="特征可见性",
-            group_name_en="feature_visibility",
-        )
-        .add_panel(
-            name="目标可见率",
-            name_en="target_visibility",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="feat_treasure_visible_rate",
-            expr="avg(feat_treasure_visible_rate{})",
-        )
-        .add_metric(
-            metrics_name="feat_buff_visible_rate",
-            expr="avg(feat_buff_visible_rate{})",
-        )
-        .add_metric(
-            metrics_name="feat_second_exists_rate",
-            expr="avg(feat_second_exists_rate{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="资源距离均值",
-            name_en="target_distance",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="feat_treasure_dist_mean",
-            expr="avg(feat_treasure_dist_mean{})",
-        )
-        .add_metric(
-            metrics_name="feat_buff_dist_mean",
-            expr="avg(feat_buff_dist_mean{})",
-        )
-        .end_panel()
-        .end_group()
-        .add_group(
-            group_name="威胁与阶段",
-            group_name_en="threat_phase",
-        )
-        .add_panel(
-            name="威胁率",
-            name_en="threat_rate",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="feat_nearest_danger_rate",
-            expr="avg(feat_nearest_danger_rate{})",
-        )
-        .add_metric(
-            metrics_name="feat_double_pressure_rate",
-            expr="avg(feat_double_pressure_rate{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="阶段覆盖",
-            name_en="phase_coverage",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="feat_post_speedup_rate",
-            expr="avg(feat_post_speedup_rate{})",
-        )
-        .add_metric(
-            metrics_name="feat_speedup_eta_mean",
-            expr="avg(feat_speedup_eta_mean{})",
-        )
-        .end_panel()
-        .end_group()
-        .add_group(
-            group_name="策略响应",
-            group_name_en="policy_response",
-        )
-        .add_panel(
-            name="闪现行为",
-            name_en="flash_behavior",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="act_flash_rate",
-            expr="avg(act_flash_rate{})",
-        )
-        .add_metric(
-            metrics_name="act_flash_in_danger_rate",
-            expr="avg(act_flash_in_danger_rate{})",
-        )
-        .add_metric(
-            metrics_name="act_flash_waste_rate",
-            expr="avg(act_flash_waste_rate{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="资源推进率",
-            name_en="target_approach",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="act_treasure_approach_rate",
-            expr="avg(act_treasure_approach_rate{})",
-        )
-        .add_metric(
-            metrics_name="act_buff_approach_rate",
-            expr="avg(act_buff_approach_rate{})",
-        )
-        .end_panel()
-        .end_group()
-        .add_group(
-            group_name="分阶段结果",
-            group_name_en="phase_result",
-        )
-        .add_panel(
-            name="阶段回报",
-            name_en="phase_reward",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="pre_reward_mean",
-            expr="avg(pre_reward_mean{})",
-        )
-        .add_metric(
-            metrics_name="post_reward_mean",
-            expr="avg(post_reward_mean{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="后期生存",
-            name_en="post_survival",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="post_steps_mean",
-            expr="avg(post_steps_mean{})",
-        )
-        .add_metric(
-            metrics_name="post_terminated_rate",
-            expr="avg(post_terminated_rate{})",
-        )
-        .end_panel()
-        .end_group()
-        .build()
     )
-    return config_dict
+
+    monitor = _add_episode_group(
+        monitor=monitor,
+        group_name="Train 指标",
+        group_name_en="train_metrics",
+        prefix="train",
+    )
+
+    monitor = _add_episode_group(
+        monitor=monitor,
+        group_name="Val 指标",
+        group_name_en="val_metrics",
+        prefix="val",
+    )
+
+    return monitor.build()
