@@ -104,18 +104,19 @@ class Preprocessor:
                         map_feat[flat_idx] = float(map_info[row][col] != 0)
                     flat_idx += 1
 
-        # Legal action mask (8D) / 合法动作掩码
-        legal_action = [1] * 8
+        # Legal action mask (16D) / 合法动作掩码
+        legal_action = [1] * 16
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
-                for j in range(min(8, len(legal_act_raw))):
+                legal_action = [0] * 16
+                for j in range(min(16, len(legal_act_raw))):
                     legal_action[j] = int(legal_act_raw[j])
             else:
-                valid_set = {int(a) for a in legal_act_raw if int(a) < 8}
-                legal_action = [1 if j in valid_set else 0 for j in range(8)]
+                valid_set = {int(a) for a in legal_act_raw if int(a) < 16}
+                legal_action = [1 if j in valid_set else 0 for j in range(16)]
 
         if sum(legal_action) == 0:
-            legal_action = [1] * 8
+            legal_action = [1] * 16
 
         # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)

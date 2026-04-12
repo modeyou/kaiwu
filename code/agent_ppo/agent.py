@@ -127,8 +127,10 @@ class Agent(BaseAgent):
         解包 ActData 为 int 动作并记录 last_action。
         """
         action = act_data.action if is_stochastic else act_data.d_action
-        self.last_action = int(action[0])
-        return int(action[0])
+        action_int = int(action[0])
+        assert 0 <= action_int < Config.ACTION_NUM
+        self.last_action = action_int
+        return action_int
 
     def _run_model(self, feature, legal_action):
         """Run model inference, return logits, value, prob.

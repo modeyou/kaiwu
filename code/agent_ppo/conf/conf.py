@@ -19,15 +19,16 @@ class Config:
         5,
         5,
         16,
-        8,
+        16, # 16个合法动作掩码
         2,
+        
     ]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)
     DIM_OF_OBSERVATION = FEATURE_LEN
 
-    # Action space / 动作空间：8个移动方向
-    ACTION_NUM = 8
+    # Action space / 动作空间：8个移动方向+8个闪现
+    ACTION_NUM = 16
 
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
