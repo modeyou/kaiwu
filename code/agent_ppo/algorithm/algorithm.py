@@ -36,7 +36,19 @@ class Algorithm:
 
         self.label_size = Config.ACTION_NUM
         self.value_num = Config.VALUE_NUM
-        self.var_beta = Config.BETA_START
+        self.lr_start = float(Config.INIT_LEARNING_RATE_START)
+        self.lr_end = float(
+            getattr(Config, "INIT_LEARNING_RATE_END", self.lr_start))
+        self.enable_lr_decay = bool(getattr(Config, "ENABLE_LR_DECAY", False))
+        self.lr_decay_steps = max(int(getattr(Config, "LR_DECAY_STEPS", 1)), 1)
+
+        self.beta_start = float(Config.BETA_START)
+        self.beta_end = float(getattr(Config, "BETA_END", self.beta_start))
+        self.enable_beta_decay = bool(
+            getattr(Config, "ENABLE_BETA_DECAY", False))
+        self.beta_decay_steps = max(
+            int(getattr(Config, "BETA_DECAY_STEPS", 1)), 1)
+        self.var_beta = self.beta_start
         self.vf_coef = Config.VF_COEF
         self.clip_param = Config.CLIP_PARAM
 
@@ -63,6 +75,8 @@ class Algorithm:
             [f.value for f in list_sample_data]).to(self.device)
         reward_sum = torch.stack(
             [f.reward_sum for f in list_sample_data]).to(self.device)
+
+        current_lr, current_beta = self._update_schedules()
 
         self.model.set_train_mode()
         self.optimizer.zero_grad()
@@ -94,6 +108,8 @@ class Algorithm:
             results = {
                 "cum_reward": round(reward.mean().item(), 4),
                 "total_loss": round(total_loss.item(), 4),
+                "lr": round(current_lr, 8),
+                "beta": round(current_beta, 8),
                 "value_loss": round(info_list["value_loss"].item(), 4),
                 "policy_loss": round(info_list["policy_loss"].item(), 4),
                 "entropy_loss": round(info_list["entropy_loss"].item(), 4),
@@ -106,6 +122,7 @@ class Algorithm:
             self.logger.info(
                 f"[train] cum_reward:{results['cum_reward']} "
                 f"[train] total_loss:{results['total_loss']} "
+                f"lr:{results['lr']} beta:{results['beta']} "
                 f"policy_loss:{results['policy_loss']} "
                 f"value_loss:{results['value_loss']} "
                 f"entropy:{results['entropy_loss']} "
@@ -195,3 +212,41 @@ class Algorithm:
         label = label * legal_action
         label = label + 1e5 * (legal_action - 1)
         return torch.nn.functional.softmax(label, dim=1)
+
+    def _linear_decay(self, start, end, step, total_steps):
+        """Linear decay from start to end over total_steps.
+
+        在 total_steps 内从 start 线性衰减到 end。
+        """
+        progress = min(max(float(step) / float(total_steps), 0.0), 1.0)
+        return start + (end - start) * progress
+
+    def _update_schedules(self):
+        """Update optimizer lr and entropy beta based on current train step.
+
+        基于当前 train_step 更新学习率和熵系数。
+        """
+        if self.enable_lr_decay:
+            current_lr = self._linear_decay(
+                start=self.lr_start,
+                end=self.lr_end,
+                step=self.train_step,
+                total_steps=self.lr_decay_steps,
+            )
+        else:
+            current_lr = self.lr_start
+
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = current_lr
+
+        if self.enable_beta_decay:
+            self.var_beta = self._linear_decay(
+                start=self.beta_start,
+                end=self.beta_end,
+                step=self.train_step,
+                total_steps=self.beta_decay_steps,
+            )
+        else:
+            self.var_beta = self.beta_start
+
+        return current_lr, self.var_beta
