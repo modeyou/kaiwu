@@ -16,8 +16,8 @@ class Config:
     # Feature dimensions / 特征维度（共66维）
     FEATURES = [
         4,   # hero_self
-        5,   # monster_1
-        5,   # monster_2
+        13,  # monster_1
+        13,  # monster_2
         16,  # map_local
         16,  # legal_action（16维动作掩码）
         2,   # progress
@@ -57,39 +57,39 @@ class Config:
     SCORE_TREASURE_WEIGHT_POST = 0.7
 
     # 基础生存奖励
-    SURVIVE_REWARD_PRE = 0.006
-    SURVIVE_REWARD_POST = 0.010
+    SURVIVE_REWARD_PRE = 0.03
+    SURVIVE_REWARD_POST = 0.05
 
     # 怪物距离塑形（后期更重）
-    DIST_SHAPING_WEIGHT_PRE = 0.05
-    DIST_SHAPING_WEIGHT_POST = 0.12
+    DIST_SHAPING_WEIGHT_PRE = 0.15
+    DIST_SHAPING_WEIGHT_POST = 0.2
     DIST_DELTA_CLIP = 2.0
 
     # 宝箱接近塑形（后期弱化，避免贪箱送死）
-    TREASURE_APPROACH_WEIGHT_PRE = 0.06
-    TREASURE_APPROACH_WEIGHT_POST = 0.02
+    TREASURE_APPROACH_WEIGHT_PRE = 0.08
+    TREASURE_APPROACH_WEIGHT_POST = 0.04
     TREASURE_APPROACH_DELTA_CLIP = 2.0
 
     # 风险阈值与惩罚
     DANGER_DIST_THRESHOLD = 3.0
     HIGH_DANGER_DIST_THRESHOLD = 1.5
     DOUBLE_PRESSURE_DIST_THRESHOLD = 8.0
-    HIGH_DANGER_PENALTY_PRE = 0.12
-    HIGH_DANGER_PENALTY_POST = 0.28
+    HIGH_DANGER_PENALTY_PRE = 0.01
+    HIGH_DANGER_PENALTY_POST = 0.05
     DOUBLE_PRESSURE_PENALTY_POST = 0.18
 
     # 闪现价值奖励（奖励“用得值”）
     FLASH_ESCAPE_MIN_GAIN = 1.5
-    FLASH_ESCAPE_REWARD_PRE = 0.35
-    FLASH_ESCAPE_REWARD_POST = 0.42
-    FLASH_TREASURE_GAIN_REWARD = 0.25
+    FLASH_ESCAPE_REWARD_PRE = 0.8
+    FLASH_ESCAPE_REWARD_POST = 1.0
+    FLASH_TREASURE_GAIN_REWARD = 0.4
     FLASH_WASTE_PENALTY = 0.15
 
     # 无效位移惩罚（轻惩罚，防止撞墙抖动）
-    INVALID_MOVE_PENALTY = 0.04
+    INVALID_MOVE_PENALTY = 0.01
 
     # 终局奖励（替代原始 ±10，避免掩盖过程目标）
-    TERMINAL_FAIL_PRE = -2.0
+    TERMINAL_FAIL_PRE = -1.0
     TERMINAL_FAIL_POST = -3.0
     TERMINAL_COMPLETE = 1.2
     TERMINAL_ABNORMAL = -1.0
@@ -107,22 +107,22 @@ class Config:
     MONSTER_SPEEDUP_JITTER = 50
 
     # 宝箱数量随机化（训练局）
-    ENABLE_TREASURE_COUNT_RANDOMIZATION = True
+    ENABLE_TREASURE_COUNT_RANDOMIZATION = False
     TREASURE_COUNT_MIN = 7
     TREASURE_COUNT_MAX = 10
 
     # 地图数量随机化（训练局）：每局从 train maps 里采样一个子集
-    ENABLE_MAP_POOL_RANDOMIZATION = True
-    MAP_POOL_SIZE_MIN = 4
+    ENABLE_MAP_POOL_RANDOMIZATION = False
+    MAP_POOL_SIZE_MIN = 6
     MAP_POOL_SIZE_MAX = 8
 
     # buff 刷新时间随机化（训练局）
-    ENABLE_BUFF_COOLDOWN_RANDOMIZATION = True
+    ENABLE_BUFF_COOLDOWN_RANDOMIZATION = False
     BUFF_COOLDOWN_MIN = 120
     BUFF_COOLDOWN_MAX = 260
 
     # 怪物移动速度随机化（训练局）
     # 仅当 env_conf 中存在 monster_speed 字段时生效；否则仅使用 monster_speedup 随机化。
-    ENABLE_MONSTER_SPEED_RANDOMIZATION = True
+    ENABLE_MONSTER_SPEED_RANDOMIZATION = False
     MONSTER_SPEED_MIN = 1
     MONSTER_SPEED_MAX = 3

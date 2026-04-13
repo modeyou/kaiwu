@@ -102,7 +102,8 @@ def _add_episode_group(monitor, group_name, group_name_en, prefix):
         ("FlashPenaltyMean", f"{p}flash_penalty_mean"),
     ]
 
-    monitor = monitor.add_group(group_name=group_name, group_name_en=group_name_en)
+    monitor = monitor.add_group(
+        group_name=group_name, group_name_en=group_name_en)
     for panel_name, metric_key in metrics:
         monitor = _add_single_metric_panel(
             monitor=monitor,
