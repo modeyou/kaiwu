@@ -249,9 +249,16 @@ class Preprocessor:
         hero_pos = hero["pos"]
         hero_x_norm = _norm(hero_pos["x"], MAP_SIZE)
         hero_z_norm = _norm(hero_pos["z"], MAP_SIZE)
-        flash_cd_norm = _norm(hero["flash_cooldown"], MAX_FLASH_CD)
-        buff_remain_norm = _norm(
-            hero["buff_remaining_time"], MAX_BUFF_DURATION)
+        # 协议中 flash_cooldown 位于 env_info；保留旧路径回退兼容。
+        flash_cd_raw = env_info.get(
+            "flash_cooldown", hero.get("flash_cooldown", 0.0)
+        )
+        # buff_remaining_time 非协议标准字段，优先沿用历史 hero 路径，缺失时回退 env_info。
+        buff_remain_raw = hero.get(
+            "buff_remaining_time", env_info.get("buff_remaining_time", 0.0)
+        )
+        flash_cd_norm = _norm(flash_cd_raw, MAX_FLASH_CD)
+        buff_remain_norm = _norm(buff_remain_raw, MAX_BUFF_DURATION)
 
         hero_feat = np.array(
             [hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
@@ -287,6 +294,14 @@ class Preprocessor:
             else:
                 monster_feats.append(np.zeros(5, dtype=np.float32))
 
+            # 在原有 monster_feats[i] 构建的 if is_in_view 分支内，追加方向信息
+            # 原来每只怪物是5维，现在扩展为5+8=13维（9个方向去掉0=重叠）
+            dir_onehot = np.zeros(8, dtype=np.float32)
+            raw_dir = int(m.get("hero_relative_direction", 0))
+            if 1 <= raw_dir <= 8:
+                dir_onehot[raw_dir - 1] = 1.0
+            monster_feats[i] = np.concatenate([monster_feats[i], dir_onehot])
+            
         # 新增特征1：按距离排序的最近怪动态特征
         visible_slots = [(idx, dist) for idx, dist in enumerate(
             current_monster_raw_dists) if dist is not None]
@@ -372,8 +387,11 @@ class Preprocessor:
 
         # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
-        survival_ratio = step_norm
-        progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
+        # 改为：已收集宝箱比例，给模型一个"任务完成度"信号
+        total_treasure = float(env_info.get("total_treasure", 10.0))
+        treasures_collected = float(env_info.get("treasures_collected", 0.0))
+        treasure_progress = _norm(treasures_collected, max(total_treasure, 1.0))
+        progress_feat = np.array([step_norm, treasure_progress], dtype=np.float32)
 
         # 新增特征3：最近宝箱目标特征
         # 优先使用协议定义的 organs(sub_type=1)，再回退旧字段名兼容。

@@ -10,6 +10,8 @@ Agent class for Gorge Chase PPO.
 峡谷追猎 PPO Agent 主类。
 """
 
+import os
+
 from agent_ppo.model.model import Model
 from agent_ppo.feature.preprocessor import Preprocessor
 from agent_ppo.feature.definition import ActData, ObsData
@@ -110,18 +112,36 @@ class Agent(BaseAgent):
 
         保存模型检查点。
         """
-        model_file_path = f"{path}/model.ckpt-{str(id)}.pkl"
+        ckpt_dir = path if path else os.path.join(
+            os.path.dirname(__file__), "ckpt")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        model_file_path = os.path.join(ckpt_dir, f"model.ckpt-{str(id)}.pkl")
         state_dict_cpu = {k: v.clone().cpu()
                           for k, v in self.model.state_dict().items()}
         torch.save(state_dict_cpu, model_file_path)
         self.logger.info(f"save model {model_file_path} successfully")
+
+        # For non-numeric IDs (e.g. best_val), keep an exact alias file for easy lookup.
+        id_str = str(id)
+        if not id_str.isdigit():
+            alias_file_path = os.path.join(ckpt_dir, f"{id_str}.pkl")
+            torch.save(state_dict_cpu, alias_file_path)
+            self.logger.info(
+                f"save model alias {alias_file_path} successfully")
 
     def load_model(self, path=None, id="1"):
         """Load model checkpoint.
 
         加载模型检查点。
         """
-        model_file_path = f"{path}/model.ckpt-{str(id)}.pkl"
+        ckpt_dir = path if path else os.path.join(
+            os.path.dirname(__file__), "ckpt")
+        model_file_path = os.path.join(ckpt_dir, f"model.ckpt-{str(id)}.pkl")
+        if (not os.path.exists(model_file_path)) and (not str(id).isdigit()):
+            alias_file_path = os.path.join(ckpt_dir, f"{str(id)}.pkl")
+            if os.path.exists(alias_file_path):
+                model_file_path = alias_file_path
+
         self.model.load_state_dict(torch.load(
             model_file_path, map_location=self.device))
         self.logger.info(f"load model {model_file_path} successfully")
