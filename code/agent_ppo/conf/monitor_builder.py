@@ -100,6 +100,10 @@ def _add_episode_group(monitor, group_name, group_name_en, prefix):
         ("DangerPenaltyMean", f"{p}danger_penalty_mean"),
         ("FlashRewardMean", f"{p}flash_reward_mean"),
         ("FlashPenaltyMean", f"{p}flash_penalty_mean"),
+        ("Attn_Mon1", f"{p}attn_mon1"),
+        ("Attn_Mon2", f"{p}attn_mon2"),
+        ("Attn_Resource", f"{p}attn_resource"),
+        ("Attn_Map", f"{p}attn_map"),
     ]
 
     monitor = monitor.add_group(

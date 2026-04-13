@@ -301,7 +301,7 @@ class Preprocessor:
             if 1 <= raw_dir <= 8:
                 dir_onehot[raw_dir - 1] = 1.0
             monster_feats[i] = np.concatenate([monster_feats[i], dir_onehot])
-            
+
         # 新增特征1：按距离排序的最近怪动态特征
         visible_slots = [(idx, dist) for idx, dist in enumerate(
             current_monster_raw_dists) if dist is not None]
@@ -360,13 +360,13 @@ class Preprocessor:
             dtype=np.float32,
         )
 
-        # Local map features (16D) / 局部地图特征
-        map_feat = np.zeros(16, dtype=np.float32)
-        if map_info is not None and len(map_info) >= 13:
+        # Local map features (81D) / 局部地图特征（9x9）
+        map_feat = np.zeros(81, dtype=np.float32)
+        if map_info is not None and len(map_info) >= 9:
             center = len(map_info) // 2
             flat_idx = 0
-            for row in range(center - 2, center + 2):
-                for col in range(center - 2, center + 2):
+            for row in range(center - 4, center + 5):
+                for col in range(center - 4, center + 5):
                     if 0 <= row < len(map_info) and 0 <= col < len(map_info[0]):
                         map_feat[flat_idx] = float(map_info[row][col] != 0)
                     flat_idx += 1
@@ -390,8 +390,10 @@ class Preprocessor:
         # 改为：已收集宝箱比例，给模型一个"任务完成度"信号
         total_treasure = float(env_info.get("total_treasure", 10.0))
         treasures_collected = float(env_info.get("treasures_collected", 0.0))
-        treasure_progress = _norm(treasures_collected, max(total_treasure, 1.0))
-        progress_feat = np.array([step_norm, treasure_progress], dtype=np.float32)
+        treasure_progress = _norm(
+            treasures_collected, max(total_treasure, 1.0))
+        progress_feat = np.array(
+            [step_norm, treasure_progress], dtype=np.float32)
 
         # 新增特征3：最近宝箱目标特征
         # 优先使用协议定义的 organs(sub_type=1)，再回退旧字段名兼容。

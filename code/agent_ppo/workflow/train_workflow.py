@@ -611,6 +611,29 @@ class EpisodeRunner:
                         collector[-1].reward = collector[-1].reward + \
                             final_reward
 
+                    # Structured model attention diagnostics:
+                    # [monster1, monster2, resource, map]
+                    attn_mon1 = -1.0
+                    attn_mon2 = -1.0
+                    attn_resource = -1.0
+                    attn_map = -1.0
+                    attn_weights = getattr(
+                        getattr(self.agent, "model", None),
+                        "_last_attn_weights",
+                        None,
+                    )
+                    if attn_weights is not None:
+                        try:
+                            attn_np = attn_weights.detach().cpu().numpy()
+                            if attn_np.ndim == 2 and attn_np.shape[1] == 4:
+                                attn_mean = attn_np.mean(axis=0)
+                                attn_mon1 = float(attn_mean[0])
+                                attn_mon2 = float(attn_mean[1])
+                                attn_resource = float(attn_mean[2])
+                                attn_map = float(attn_mean[3])
+                        except (TypeError, ValueError, RuntimeError):
+                            pass
+
                     episode_metrics = {
                         "reward": round(total_reward + float(final_reward[0]), 4),
                         "total_score": round(final_total_score, 4),
@@ -649,6 +672,10 @@ class EpisodeRunner:
                         "danger_penalty_mean": round(sum_danger_penalty / max(step, 1), 4),
                         "flash_reward_mean": round(sum_flash_reward / max(step, 1), 4),
                         "flash_penalty_mean": round(sum_flash_penalty / max(step, 1), 4),
+                        "attn_mon1": round(attn_mon1, 4),
+                        "attn_mon2": round(attn_mon2, 4),
+                        "attn_resource": round(attn_resource, 4),
+                        "attn_map": round(attn_map, 4),
                     }
 
                     # Monitor report / 监控上报
