@@ -54,6 +54,134 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
                 last_save_model_time = now
 
 
+class CurriculumManager:
+    """Performance-driven curriculum manager.
+
+    基于验证指标自动晋级课程阶段，避免按固定局数生硬切换。
+    """
+
+    def __init__(self):
+        self.stage_names = ["easy", "medium", "hard", "expert"]
+        self.stage_idx = 0
+        self.train_episodes_in_stage = 0
+        self.promotion_streak = 0
+        self.warmup_episodes = max(
+            int(getattr(Config, "CURRICULUM_WARMUP_EPISODES", 100)), 1
+        )
+        self.promotion_window = max(
+            int(getattr(Config, "CURRICULUM_PROMOTION_WINDOW", 5)), 1
+        )
+
+        # 每个阶段的环境覆盖配置（tuple 表示 [min, max] 采样）。
+        self.stage_overrides = {
+            "easy": {
+                "treasure_count": (9, 10),
+                "buff_count": (2, 2),
+                "monster_interval": (2000, 2000),
+                "monster_speedup": (2000, 2000),
+                "max_step": 600,
+            },
+            "medium": {
+                "treasure_count": (8, 10),
+                "buff_count": (1, 2),
+                "monster_interval": (300, 500),
+                "monster_speedup": (500, 800),
+                "max_step": 800,
+            },
+            "hard": {
+                "treasure_count": (7, 10),
+                "buff_count": (1, 2),
+                "monster_interval": (260, 340),
+                "monster_speedup": (450, 550),
+                "max_step": 1000,
+            },
+            "expert": {
+                "treasure_count": (6, 10),
+                "buff_count": (0, 2),
+                "monster_interval": (120, 320),
+                "monster_speedup": (140, 420),
+                "buff_cooldown": (100, 300),
+                "max_step": 1000,
+            },
+        }
+
+    def current_stage_name(self):
+        return self.stage_names[self.stage_idx]
+
+    def note_train_episode_end(self):
+        self.train_episodes_in_stage += 1
+
+    def _sample_or_mid(self, value, is_val):
+        if isinstance(value, tuple) and len(value) == 2:
+            low, high = int(value[0]), int(value[1])
+            if low > high:
+                low, high = high, low
+            if is_val:
+                return int((low + high) // 2)
+            return random.randint(low, high)
+        return int(value)
+
+    def build_env_overrides(self, is_val):
+        stage_name = self.current_stage_name()
+        cfg = self.stage_overrides[stage_name]
+        result = {}
+        for k, v in cfg.items():
+            result[k] = self._sample_or_mid(v, is_val=is_val)
+        return result
+
+    def _promotion_condition(self, stage_name, val_metrics):
+        if stage_name == "easy":
+            return (
+                float(val_metrics.get("completed_rate", 0.0))
+                >= float(getattr(Config, "CURRICULUM_EASY_PROMOTE_COMPLETED_RATE", 0.30))
+            )
+
+        if stage_name == "medium":
+            return (
+                float(val_metrics.get("steps", 0.0))
+                >= float(getattr(Config, "CURRICULUM_MEDIUM_PROMOTE_STEPS", 400.0))
+                and float(val_metrics.get("treasures", 0.0))
+                >= float(getattr(Config, "CURRICULUM_MEDIUM_PROMOTE_TREASURES", 0.5))
+            )
+
+        if stage_name == "hard":
+            return (
+                float(val_metrics.get("total_score", 0.0))
+                >= float(getattr(Config, "CURRICULUM_HARD_PROMOTE_TOTAL_SCORE", 600.0))
+                and float(val_metrics.get("terminated_rate", 1.0))
+                <= float(getattr(Config, "CURRICULUM_HARD_PROMOTE_TERMINATED_RATE", 0.5))
+            )
+
+        return False
+
+    def try_promote(self, val_metrics):
+        if self.stage_idx >= len(self.stage_names) - 1:
+            return False, "already_final_stage"
+
+        if self.train_episodes_in_stage < self.warmup_episodes:
+            return False, (
+                f"warmup {self.train_episodes_in_stage}/{self.warmup_episodes}"
+            )
+
+        stage_name = self.current_stage_name()
+        cond_ok = self._promotion_condition(stage_name, val_metrics)
+        if cond_ok:
+            self.promotion_streak += 1
+        else:
+            self.promotion_streak = 0
+
+        if self.promotion_streak < self.promotion_window:
+            return False, (
+                f"streak {self.promotion_streak}/{self.promotion_window}"
+            )
+
+        prev_stage = stage_name
+        self.stage_idx += 1
+        self.train_episodes_in_stage = 0
+        self.promotion_streak = 0
+        return True, f"{prev_stage}->{self.current_stage_name()}"
+
+
 class EpisodeRunner:
     def __init__(self, env, agent, usr_conf, logger, monitor):
         self.env = env
@@ -103,11 +231,19 @@ class EpisodeRunner:
         self.monster_speed_max = int(getattr(Config, "MONSTER_SPEED_MAX", 3))
         self._warned_monster_speed_missing = False
 
+        self.enable_curriculum = bool(
+            getattr(Config, "ENABLE_CURRICULUM_LEARNING", True)
+        )
+        self.curriculum_manager = CurriculumManager() if self.enable_curriculum else None
+        self.val_eval_window = max(int(getattr(Config, "VAL_EVAL_WINDOW", 5)), 1)
+        self.val_eval_buffer = []
+
         # 基于验证集的最佳模型跟踪
         self.best_val_total_score = float("-inf")
         self.best_val_steps = float("-inf")
         self.best_val_reward = float("-inf")
         self.best_val_episode = -1
+        self.best_stage_name = None
 
         # 训练/验证配置拆分：train 用前 80%，val 用后 20% 地图
         self.train_usr_conf, self.val_usr_conf = self._build_train_val_confs(
@@ -210,10 +346,43 @@ class EpisodeRunner:
         """
         base_conf = self.val_usr_conf if is_val else self.train_usr_conf
         run_conf = copy.deepcopy(base_conf)
-        if is_val or (not self.enable_bounded_random):
+        env_conf = run_conf.setdefault("env_conf", {})
+
+        # 课程学习优先：按阶段直接覆盖环境参数。
+        if self.curriculum_manager is not None:
+            stage_name = self.curriculum_manager.current_stage_name()
+            overrides = self.curriculum_manager.build_env_overrides(is_val=is_val)
+            env_conf.update(overrides)
+
+            # 仅在 expert 阶段训练时叠加地图池随机化，增强泛化。
+            if (not is_val) and stage_name == "expert":
+                map_pool = list(env_conf.get("map", []))
+                if self.enable_map_pool_randomization and map_pool:
+                    max_pool = min(max(1, self.map_pool_size_max), len(map_pool))
+                    min_pool = min(max(1, self.map_pool_size_min), max_pool)
+                    sampled_pool_size = random.randint(min_pool, max_pool)
+                    env_conf["map"] = random.sample(map_pool, sampled_pool_size)
+                    env_conf["map_random"] = True
+
+                if self.enable_monster_speed_randomization and "monster_speed" in env_conf:
+                    spd_min = max(1, self.monster_speed_min)
+                    spd_max = max(1, self.monster_speed_max)
+                    if spd_min > spd_max:
+                        spd_min, spd_max = spd_max, spd_min
+                    env_conf["monster_speed"] = random.randint(spd_min, spd_max)
+
+            self.logger.info(
+                f"[CURRICULUM {('VAL' if is_val else 'TRAIN')}] stage={stage_name} "
+                f"treasure_count={env_conf.get('treasure_count', 'NA')} "
+                f"buff_count={env_conf.get('buff_count', 'NA')} "
+                f"monster_interval={env_conf.get('monster_interval', 'NA')} "
+                f"monster_speedup={env_conf.get('monster_speedup', 'NA')} "
+                f"max_step={env_conf.get('max_step', 'NA')}"
+            )
             return run_conf
 
-        env_conf = run_conf.setdefault("env_conf", {})
+        if is_val or (not self.enable_bounded_random):
+            return run_conf
 
         # 地图数量随机化：每局从当前 train maps 中随机采样一个子集
         map_pool = list(env_conf.get("map", []))
@@ -294,44 +463,125 @@ class EpisodeRunner:
         )
         return run_conf
 
+    def _aggregate_val_metrics(self, val_metrics):
+        """Aggregate validation metrics with moving-average window.
+
+        使用滑动窗口平均验证指标，降低单局随机方差影响。
+        """
+        tracked = {
+            "reward": float(val_metrics.get("reward", 0.0)),
+            "total_score": float(val_metrics.get("total_score", 0.0)),
+            "steps": float(val_metrics.get("steps", 0.0)),
+            "treasures": float(val_metrics.get("treasures", 0.0)),
+            "terminated_rate": float(val_metrics.get("terminated_rate", 1.0)),
+            "completed_rate": float(val_metrics.get("completed_rate", 0.0)),
+        }
+        self.val_eval_buffer.append(tracked)
+        if len(self.val_eval_buffer) > self.val_eval_window:
+            self.val_eval_buffer = self.val_eval_buffer[-self.val_eval_window:]
+
+        if len(self.val_eval_buffer) < self.val_eval_window:
+            self.logger.info(
+                f"[VAL EVAL] warmup {len(self.val_eval_buffer)}/{self.val_eval_window}, skip aggregate"
+            )
+            return None
+
+        avg = {}
+        for k in tracked.keys():
+            avg[k] = float(np.mean([m[k] for m in self.val_eval_buffer]))
+        return avg
+
     def _try_save_best_val_model(self, val_metrics):
         """Save best-val checkpoint when validation metrics improve.
 
         当验证指标刷新历史最优时，保存 best_val 检查点。
         """
+        stage_name = (
+            self.curriculum_manager.current_stage_name()
+            if self.curriculum_manager is not None
+            else "none"
+        )
+
+        # 切换阶段时重置 best 比较基准，避免跨阶段比较失真。
+        if self.best_stage_name != stage_name:
+            self.best_stage_name = stage_name
+            self.best_val_total_score = float("-inf")
+            self.best_val_steps = float("-inf")
+            self.best_val_reward = float("-inf")
+            self.best_val_episode = -1
+
+        val_completed_rate = float(val_metrics.get("completed_rate", 0.0))
+        val_terminated_rate = float(val_metrics.get("terminated_rate", 1.0))
+        val_treasures = float(val_metrics.get("treasures", 0.0))
         val_total_score = float(val_metrics.get("total_score", 0.0))
         val_steps = float(val_metrics.get("steps", 0.0))
         val_reward = float(val_metrics.get("reward", 0.0))
 
-        improved = (
-            (val_total_score > self.best_val_total_score)
-            or (
-                val_total_score == self.best_val_total_score
-                and val_steps > self.best_val_steps
-            )
-            or (
-                val_total_score == self.best_val_total_score
-                and val_steps == self.best_val_steps
-                and val_reward > self.best_val_reward
-            )
-        )
+        if stage_name == "easy":
+            candidate = (val_completed_rate, val_steps, val_reward)
+            baseline = (self.best_val_total_score, self.best_val_steps, self.best_val_reward)
+        elif stage_name == "medium":
+            candidate = (val_steps, val_treasures, val_reward)
+            baseline = (self.best_val_total_score, self.best_val_steps, self.best_val_reward)
+        else:
+            candidate = (val_total_score, -val_terminated_rate, val_reward)
+            baseline = (self.best_val_total_score, self.best_val_steps, self.best_val_reward)
+
+        improved = candidate > baseline
         if not improved:
             return
 
-        self.best_val_total_score = val_total_score
-        self.best_val_steps = val_steps
-        self.best_val_reward = val_reward
+        self.best_val_total_score = candidate[0]
+        self.best_val_steps = candidate[1]
+        self.best_val_reward = candidate[2]
         self.best_val_episode = self.episode_cnt
 
         try:
             # 保留稳定别名，便于随时加载当前最优。
             self.agent.save_model(id="best_val")
+            self.agent.save_model(id="best_model")  # 保存一个最佳前缀供长线调用
+            
+            # 为了满足业务平台提取 best_model.zip 的需求，我们可以将它额外打一个zip
+            import zipfile
+            ckpt_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ckpt")
+            best_model_pkl = os.path.join(ckpt_dir, "best_model.pkl")
+            # Navigate to kaiwu/train/backup_model
+            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+            backup_dir = os.path.join(root_dir, "train", "backup_model")
+            os.makedirs(backup_dir, exist_ok=True)
+            if os.path.exists(best_model_pkl):
+                zip_path = os.path.join(backup_dir, "best_model.zip")
+                with zipfile.ZipFile(zip_path, 'w') as zf:
+                    zf.write(best_model_pkl, arcname="best_model.pkl")
+                    
             self.logger.info(
-                f"[VAL BEST] episode:{self.episode_cnt} score:{val_total_score:.1f} "
-                f"steps:{val_steps:.1f} reward:{val_reward:.3f} saved_id:best_val"
+                f"[VAL BEST] episode:{self.episode_cnt} stage:{stage_name} window:{self.val_eval_window} "
+                f"avg_score:{val_total_score:.1f} avg_steps:{val_steps:.1f} "
+                f"avg_completed:{val_completed_rate:.3f} avg_terminated:{val_terminated_rate:.3f} "
+                f"avg_reward:{val_reward:.3f} saved_id:best_val and best_model.zip"
             )
         except (OSError, RuntimeError, ValueError) as err:
             self.logger.error(f"[VAL BEST] save failed: {err}")
+
+    def _try_promote_curriculum(self, avg_val_metrics):
+        """Try promote curriculum stage from averaged validation metrics."""
+        if self.curriculum_manager is None:
+            return
+
+        promoted, detail = self.curriculum_manager.try_promote(avg_val_metrics)
+        if not promoted:
+            return
+
+        # 切阶段后清空验证窗口，避免不同阶段分布混合。
+        self.val_eval_buffer = []
+
+        self.logger.info(
+            f"[CURRICULUM PROMOTE] episode:{self.episode_cnt} detail:{detail} "
+            f"avg_completed_rate:{avg_val_metrics.get('completed_rate', 0.0):.3f} "
+            f"avg_steps:{avg_val_metrics.get('steps', 0.0):.1f} "
+            f"avg_treasures:{avg_val_metrics.get('treasures', 0.0):.3f} "
+            f"avg_score:{avg_val_metrics.get('total_score', 0.0):.1f}"
+        )
 
     def _prefix_metrics(self, metrics, prefix):
         """Add mode prefix for monitor keys.
@@ -348,6 +598,11 @@ class EpisodeRunner:
         while True:
             # 决定当前局模式：训练 or 验证
             is_val = self._should_run_val()
+            stage_name = (
+                self.curriculum_manager.current_stage_name()
+                if self.curriculum_manager is not None
+                else "none"
+            )
             run_conf = self._build_episode_conf(is_val)
             mode_str = "VAL" if is_val else "TRAIN"
             mode_prefix = "val" if is_val else "train"
@@ -369,6 +624,8 @@ class EpisodeRunner:
 
             # Reset agent & load latest model / 重置 Agent 并加载最新模型
             self.agent.reset(env_obs)
+            if hasattr(self.agent, "preprocessor") and hasattr(self.agent.preprocessor, "set_curriculum_stage"):
+                self.agent.preprocessor.set_curriculum_stage(stage_name)
             self.agent.load_model(id="latest")
 
             # Initial observation / 初始观测处理
@@ -423,7 +680,8 @@ class EpisodeRunner:
             sum_flash_penalty = 0.0
 
             self.logger.info(
-                f"[{mode_str}] total_episode:{self.episode_cnt} train_episode:{self.train_episode_cnt} val_episode:{self.val_episode_cnt} start"
+                f"[{mode_str}] total_episode:{self.episode_cnt} train_episode:{self.train_episode_cnt} "
+                f"val_episode:{self.val_episode_cnt} stage:{stage_name} start"
             )
 
             while not done:
@@ -676,7 +934,20 @@ class EpisodeRunner:
                         "attn_mon2": round(attn_mon2, 4),
                         "attn_resource": round(attn_resource, 4),
                         "attn_map": round(attn_map, 4),
+                        "curriculum_stage_idx": float(
+                            self.curriculum_manager.stage_idx
+                            if self.curriculum_manager is not None
+                            else -1
+                        ),
+                        "curriculum_train_episodes_in_stage": float(
+                            self.curriculum_manager.train_episodes_in_stage
+                            if self.curriculum_manager is not None
+                            else -1
+                        ),
                     }
+
+                    if (not is_val) and self.curriculum_manager is not None:
+                        self.curriculum_manager.note_train_episode_end()
 
                     # Monitor report / 监控上报
                     if self.monitor:
@@ -685,9 +956,12 @@ class EpisodeRunner:
                                 episode_metrics, mode_prefix)}
                         )
 
-                    # 验证局触发 best model 保存（基于 val_total_score/val_steps/reward）
+                    # 验证局使用滑动均值评估，并驱动课程晋级。
                     if is_val:
-                        self._try_save_best_val_model(episode_metrics)
+                        avg_val_metrics = self._aggregate_val_metrics(episode_metrics)
+                        if avg_val_metrics is not None:
+                            self._try_save_best_val_model(avg_val_metrics)
+                            self._try_promote_curriculum(avg_val_metrics)
 
                     if collector and (not is_val):
                         collector = sample_process(collector)

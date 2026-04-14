@@ -43,6 +43,9 @@ class Preprocessor:
         # 先声明状态字段，避免静态检查误报
         self.step_no = 0
         self.max_step = 200
+        self.curriculum_stage = "none"
+        self.flash_escape_min_gain_override = None
+        self.flash_waste_penalty_override = None
         self.last_min_monster_dist_norm = 0.5
         self.prev_monster_raw_dists = [None, None]
         self.prev_step_score = None
@@ -63,6 +66,23 @@ class Preprocessor:
         self.prev_min_monster_raw_dist = None
         self.prev_nearest_treasure_raw_dist = None
         self.prev_hero_pos = None
+
+    def set_curriculum_stage(self, stage_name):
+        """Set curriculum stage and update stage-dependent reward overrides.
+
+        设置课程阶段，并更新阶段相关的奖励参数覆盖。
+        """
+        self.curriculum_stage = str(stage_name or "none")
+        self.flash_escape_min_gain_override = None
+        self.flash_waste_penalty_override = None
+
+        if self.curriculum_stage == "easy":
+            # easy 阶段禁用闪现动作，惩罚关闭避免干扰。
+            self.flash_waste_penalty_override = 0.0
+        elif self.curriculum_stage == "medium":
+            # medium 阶段鼓励学习闪现：放宽逃脱判定并去掉浪费惩罚。
+            self.flash_escape_min_gain_override = 0.8
+            self.flash_waste_penalty_override = 0.0
 
     def _as_float(self, v, default=0.0):
         """Safe float conversion.
@@ -268,8 +288,8 @@ class Preprocessor:
         monster_feats = []
         current_monster_raw_dists = [None, None]
         for i in range(2):
+            m = monsters[i] if i < len(monsters) else None
             if i < len(monsters):
-                m = monsters[i]
                 is_in_view = float(m.get("is_in_view", 0))
                 m_pos = m["pos"]
                 if is_in_view:
@@ -297,7 +317,8 @@ class Preprocessor:
             # 在原有 monster_feats[i] 构建的 if is_in_view 分支内，追加方向信息
             # 原来每只怪物是5维，现在扩展为5+8=13维（9个方向去掉0=重叠）
             dir_onehot = np.zeros(8, dtype=np.float32)
-            raw_dir = int(m.get("hero_relative_direction", 0))
+            raw_dir = int(m.get("hero_relative_direction", 0)
+                          ) if m is not None else 0
             if 1 <= raw_dir <= 8:
                 dir_onehot[raw_dir - 1] = 1.0
             monster_feats[i] = np.concatenate([monster_feats[i], dir_onehot])
@@ -382,8 +403,16 @@ class Preprocessor:
                 valid_set = {int(a) for a in legal_act_raw if int(a) < 16}
                 legal_action = [1 if j in valid_set else 0 for j in range(16)]
 
+        # 课程学习 easy 阶段：屏蔽闪现动作，仅学习移动与避障。
+        if self.curriculum_stage == "easy":
+            for j in range(8, 16):
+                legal_action[j] = 0
+
         if sum(legal_action) == 0:
-            legal_action = [1] * 16
+            if self.curriculum_stage == "easy":
+                legal_action = [1] * 8 + [0] * 8
+            else:
+                legal_action = [1] * 16
 
         # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
@@ -544,10 +573,20 @@ class Preprocessor:
         # 6) 闪现价值奖励：奖励“用得值”，惩罚无效交闪
         flash_reward = 0.0
         flash_penalty = 0.0
+        flash_escape_min_gain = (
+            self.flash_escape_min_gain_override
+            if self.flash_escape_min_gain_override is not None
+            else Config.FLASH_ESCAPE_MIN_GAIN
+        )
+        flash_waste_penalty = (
+            self.flash_waste_penalty_override
+            if self.flash_waste_penalty_override is not None
+            else Config.FLASH_WASTE_PENALTY
+        )
         if _last_action is not None and int(_last_action) >= 8:
             prev_danger = prev_min_monster_raw_dist <= Config.DANGER_DIST_THRESHOLD
             danger_improve = cur_min_monster_raw_dist - prev_min_monster_raw_dist
-            escaped = prev_danger and danger_improve >= Config.FLASH_ESCAPE_MIN_GAIN
+            escaped = prev_danger and danger_improve >= flash_escape_min_gain
             if escaped:
                 flash_reward += (
                     Config.FLASH_ESCAPE_REWARD_POST if is_post else Config.FLASH_ESCAPE_REWARD_PRE
@@ -555,7 +594,7 @@ class Preprocessor:
             if treasure_gain > 0.0:
                 flash_reward += Config.FLASH_TREASURE_GAIN_REWARD
             if (not escaped) and step_gain <= 0.0 and treasure_gain <= 0.0:
-                flash_penalty -= Config.FLASH_WASTE_PENALTY
+                flash_penalty -= flash_waste_penalty
 
         # 7) 无效移动惩罚：减少原地抖动/撞墙行为
         invalid_move_penalty = 0.0

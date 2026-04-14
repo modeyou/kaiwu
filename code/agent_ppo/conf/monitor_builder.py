@@ -118,6 +118,30 @@ def _add_episode_group(monitor, group_name, group_name_en, prefix):
     return monitor.end_group()
 
 
+def _add_curriculum_group(monitor):
+    """Build curriculum progress monitor group.
+
+    课程学习进度：展示阶段索引与阶段内训练局数（train/val）。
+    """
+    metrics = [
+        ("训练阶段索引", "cur_train_stage", "train_curriculum_stage_idx"),
+        ("训练阶段局数", "cur_train_episodes", "train_curriculum_train_episodes_in_stage"),
+        ("验证阶段索引", "cur_val_stage", "val_curriculum_stage_idx"),
+        ("验证阶段局数", "cur_val_episodes", "val_curriculum_train_episodes_in_stage"),
+    ]
+
+    monitor = monitor.add_group(
+        group_name="课程学习进度", group_name_en="curriculum_progress")
+    for panel_name, panel_name_en, metric_key in metrics:
+        monitor = _add_single_metric_panel(
+            monitor=monitor,
+            panel_name=panel_name,
+            panel_name_en=panel_name_en,
+            metric_key=metric_key,
+        )
+    return monitor.end_group()
+
+
 def build_monitor():
     """
     # This function is used to create monitoring panel configurations for custom indicators.
@@ -141,5 +165,7 @@ def build_monitor():
         group_name_en="val_metrics",
         prefix="val",
     )
+
+    monitor = _add_curriculum_group(monitor)
 
     return monitor.build()
