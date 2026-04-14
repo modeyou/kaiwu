@@ -59,7 +59,9 @@ def _calc_gae(list_sample_data):
     gamma = Config.GAMMA
     lamda = Config.LAMDA
     for sample in reversed(list_sample_data):
-        delta = -sample.value + sample.reward + gamma * sample.next_value
-        gae = gae * gamma * lamda + delta
+        done = np.asarray(sample.done, dtype=np.float32)
+        not_done = 1.0 - done
+        delta = -sample.value + sample.reward + gamma * sample.next_value * not_done
+        gae = gae * gamma * lamda * not_done + delta
         sample.advantage = gae
         sample.reward_sum = gae + sample.value

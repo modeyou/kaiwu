@@ -50,8 +50,11 @@ class Preprocessor:
         self.prev_monster_raw_dists = [None, None]
         self.prev_step_score = None
         self.prev_treasure_score = None
+        self.prev_buff_score = None
         self.prev_min_monster_raw_dist = None
         self.prev_nearest_treasure_raw_dist = None
+        self.prev_nearest_buff_raw_dist = None
+        self.prev_buff_active = 0.0
         self.prev_hero_pos = None
         self.reset()
 
@@ -63,8 +66,11 @@ class Preprocessor:
         self.prev_monster_raw_dists = [None, None]
         self.prev_step_score = None
         self.prev_treasure_score = None
+        self.prev_buff_score = None
         self.prev_min_monster_raw_dist = None
         self.prev_nearest_treasure_raw_dist = None
+        self.prev_nearest_buff_raw_dist = None
+        self.prev_buff_active = 0.0
         self.prev_hero_pos = None
 
     def set_curriculum_stage(self, stage_name):
@@ -77,8 +83,9 @@ class Preprocessor:
         self.flash_waste_penalty_override = None
 
         if self.curriculum_stage == "easy":
-            # easy 阶段禁用闪现动作，惩罚关闭避免干扰。
+            # easy 阶段开放闪现动作，但惩罚关闭避免干扰。
             self.flash_waste_penalty_override = 0.0
+            self.flash_escape_min_gain_override = 0.5  # 放宽触发条件
         elif self.curriculum_stage == "medium":
             # medium 阶段鼓励学习闪现：放宽逃脱判定并去掉浪费惩罚。
             self.flash_escape_min_gain_override = 0.8
@@ -403,16 +410,8 @@ class Preprocessor:
                 valid_set = {int(a) for a in legal_act_raw if int(a) < 16}
                 legal_action = [1 if j in valid_set else 0 for j in range(16)]
 
-        # 课程学习 easy 阶段：屏蔽闪现动作，仅学习移动与避障。
-        if self.curriculum_stage == "easy":
-            for j in range(8, 16):
-                legal_action[j] = 0
-
         if sum(legal_action) == 0:
-            if self.curriculum_stage == "easy":
-                legal_action = [1] * 8 + [0] * 8
-            else:
-                legal_action = [1] * 16
+            legal_action = [1] * 16
 
         # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
@@ -465,7 +464,9 @@ class Preprocessor:
                     "speedup",
                 ],
             )
-        nearest_buff_feat, _ = self._nearest_target_feature(hero_pos, buffs)
+        nearest_buff_feat, nearest_buff_raw_dist = self._nearest_target_feature(
+            hero_pos, buffs
+        )
 
         # 新增特征5：阶段提示特征（怪物加速前后）
         monster_speedup_step = self._parse_monster_speedup_step(env_info)
@@ -515,10 +516,14 @@ class Preprocessor:
         is_post = bool(post_speedup_flag > 0.5)
         w_step = Config.SCORE_STEP_WEIGHT_POST if is_post else Config.SCORE_STEP_WEIGHT_PRE
         w_treasure = Config.SCORE_TREASURE_WEIGHT_POST if is_post else Config.SCORE_TREASURE_WEIGHT_PRE
+        w_buff = Config.SCORE_BUFF_WEIGHT_POST if is_post else Config.SCORE_BUFF_WEIGHT_PRE
         w_survive = Config.SURVIVE_REWARD_POST if is_post else Config.SURVIVE_REWARD_PRE
         w_dist = Config.DIST_SHAPING_WEIGHT_POST if is_post else Config.DIST_SHAPING_WEIGHT_PRE
         w_treasure_approach = (
             Config.TREASURE_APPROACH_WEIGHT_POST if is_post else Config.TREASURE_APPROACH_WEIGHT_PRE
+        )
+        w_buff_approach = (
+            Config.BUFF_APPROACH_WEIGHT_POST if is_post else Config.BUFF_APPROACH_WEIGHT_PRE
         )
 
         # 1) 与官方评分直接绑定：步数分增量 + 宝箱分增量
@@ -526,11 +531,27 @@ class Preprocessor:
         prev_treasure_score = (
             self.prev_treasure_score if self.prev_treasure_score is not None else treasure_score
         )
+        buff_score = float(
+            env_info.get("buff_score", env_info.get("speed_buff_score", 0.0))
+        )
+        prev_buff_score = (
+            self.prev_buff_score if self.prev_buff_score is not None else buff_score
+        )
         delta_step_score = max(step_score - prev_step_score, 0.0)
         delta_treasure_score = max(treasure_score - prev_treasure_score, 0.0)
+        delta_buff_score = max(buff_score - prev_buff_score, 0.0)
         step_gain = delta_step_score / Config.STEP_SCORE_UNIT
         treasure_gain = delta_treasure_score / Config.TREASURE_SCORE_UNIT
-        score_reward = w_step * step_gain + w_treasure * treasure_gain
+        # buff 得分单位与宝箱保持一致。
+        buff_score_gain = delta_buff_score / Config.TREASURE_SCORE_UNIT
+        buff_active = float(self._as_float(buff_remain_raw, 0.0) > 0.0)
+        prev_buff_active = float(self.prev_buff_active > 0.0)
+        buff_pickup_gain = 1.0 if (
+            buff_active > 0.5 and prev_buff_active <= 0.5) else 0.0
+        # 优先兼容协议中的 buff_score；若无该字段则回退到 buff 状态跃迁检测。
+        buff_gain = max(buff_score_gain, buff_pickup_gain)
+        score_reward = w_step * step_gain + w_treasure * \
+            treasure_gain + w_buff * buff_gain
 
         # 2) 基础生存奖励
         survive_reward = w_survive
@@ -554,7 +575,18 @@ class Preprocessor:
             )
             treasure_approach = w_treasure_approach * float(treasure_delta)
 
-        # 5) 风险惩罚：后期更重
+        # 5) buff 塑形：仅在可见 buff 时计算接近趋势（与宝箱同逻辑）
+        buff_approach = 0.0
+        prev_buff_raw_dist = self.prev_nearest_buff_raw_dist
+        if nearest_buff_raw_dist is not None and prev_buff_raw_dist is not None:
+            buff_delta = np.clip(
+                prev_buff_raw_dist - nearest_buff_raw_dist,
+                -Config.BUFF_APPROACH_DELTA_CLIP,
+                Config.BUFF_APPROACH_DELTA_CLIP,
+            )
+            buff_approach = w_buff_approach * float(buff_delta)
+
+        # 6) 风险惩罚：后期更重
         is_high_danger = float(cur_min_monster_raw_dist <=
                                Config.HIGH_DANGER_DIST_THRESHOLD)
         danger_penalty = -(
@@ -570,7 +602,7 @@ class Preprocessor:
         double_pressure_penalty = -Config.DOUBLE_PRESSURE_PENALTY_POST * \
             double_pressure if is_post else 0.0
 
-        # 6) 闪现价值奖励：奖励“用得值”，惩罚无效交闪
+        # 7) 闪现价值奖励：奖励“用得值”，惩罚无效交闪
         flash_reward = 0.0
         flash_penalty = 0.0
         flash_escape_min_gain = (
@@ -584,6 +616,9 @@ class Preprocessor:
             else Config.FLASH_WASTE_PENALTY
         )
         if _last_action is not None and int(_last_action) >= 8:
+            if prev_min_monster_raw_dist <= Config.FLASH_CRITICAL_DANGER_DIST_THRESHOLD:
+                # 极度危险时交闪给基础正反馈，避免仅因结果导向抑制应急闪现。
+                flash_reward += Config.FLASH_CRITICAL_DANGER_USE_REWARD
             prev_danger = prev_min_monster_raw_dist <= Config.DANGER_DIST_THRESHOLD
             danger_improve = cur_min_monster_raw_dist - prev_min_monster_raw_dist
             escaped = prev_danger and danger_improve >= flash_escape_min_gain
@@ -596,7 +631,7 @@ class Preprocessor:
             if (not escaped) and step_gain <= 0.0 and treasure_gain <= 0.0:
                 flash_penalty -= flash_waste_penalty
 
-        # 7) 无效移动惩罚：减少原地抖动/撞墙行为
+        # 8) 无效移动惩罚：减少原地抖动/撞墙行为
         invalid_move_penalty = 0.0
         if _last_action is not None and 0 <= int(_last_action) < 8 and self.prev_hero_pos is not None:
             dx = float(hero_pos["x"] - self.prev_hero_pos[0])
@@ -610,6 +645,7 @@ class Preprocessor:
             + survive_reward
             + dist_shaping
             + treasure_approach
+            + buff_approach
             + danger_penalty
             + double_pressure_penalty
             + flash_reward
@@ -624,9 +660,11 @@ class Preprocessor:
             "score_reward": float(score_reward),
             "step_gain": float(step_gain),
             "treasure_gain": float(treasure_gain),
+            "buff_gain": float(buff_gain),
             "survive_reward": float(survive_reward),
             "dist_shaping": float(dist_shaping),
             "treasure_approach": float(treasure_approach),
+            "buff_approach": float(buff_approach),
             "danger_penalty": float(danger_penalty),
             "double_pressure_penalty": float(double_pressure_penalty),
             "flash_reward": float(flash_reward),
@@ -646,8 +684,11 @@ class Preprocessor:
         self.prev_monster_raw_dists = current_monster_raw_dists
         self.prev_step_score = step_score
         self.prev_treasure_score = treasure_score
+        self.prev_buff_score = buff_score
         self.prev_min_monster_raw_dist = cur_min_monster_raw_dist
         self.prev_nearest_treasure_raw_dist = nearest_treasure_raw_dist
+        self.prev_nearest_buff_raw_dist = nearest_buff_raw_dist
+        self.prev_buff_active = buff_active
         self.prev_hero_pos = (float(hero_pos["x"]), float(hero_pos["z"]))
 
         reward = [total_reward]

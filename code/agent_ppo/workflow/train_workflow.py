@@ -14,6 +14,7 @@ import os
 import time
 import copy
 import random
+import shutil
 
 import numpy as np
 from agent_ppo.conf.conf import Config
@@ -77,30 +78,33 @@ class CurriculumManager:
             "easy": {
                 "treasure_count": (9, 10),
                 "buff_count": (2, 2),
-                "monster_interval": (2000, 2000),
+                "buff_cooldown": (100, 150),
+                "monster_interval": (300, 500),  # 一开始就学习双拐
                 "monster_speedup": (2000, 2000),
-                "max_step": 600,
+                "max_step": 700,   # 500
             },
             "medium": {
                 "treasure_count": (8, 10),
                 "buff_count": (1, 2),
-                "monster_interval": (300, 500),
-                "monster_speedup": (500, 800),
-                "max_step": 800,
+                "buff_cooldown": (100, 200),
+                "monster_interval": (250, 400),
+                "monster_speedup": (400, 600),
+                "max_step": 900,
             },
             "hard": {
-                "treasure_count": (7, 10),
+                "treasure_count": (7, 9),
                 "buff_count": (1, 2),
-                "monster_interval": (260, 340),
-                "monster_speedup": (450, 550),
+                "buff_cooldown": (100, 200),
+                "monster_interval": (200, 450),
+                "monster_speedup": (350, 550),
                 "max_step": 1000,
             },
             "expert": {
                 "treasure_count": (6, 10),
-                "buff_count": (0, 2),
-                "monster_interval": (120, 320),
-                "monster_speedup": (140, 420),
-                "buff_cooldown": (100, 300),
+                "buff_count": (1, 2),
+                "buff_cooldown": (80, 120),
+                "monster_interval": (150, 600),
+                "monster_speedup": (250, 600),
                 "max_step": 1000,
             },
         }
@@ -235,7 +239,8 @@ class EpisodeRunner:
             getattr(Config, "ENABLE_CURRICULUM_LEARNING", True)
         )
         self.curriculum_manager = CurriculumManager() if self.enable_curriculum else None
-        self.val_eval_window = max(int(getattr(Config, "VAL_EVAL_WINDOW", 5)), 1)
+        self.val_eval_window = max(
+            int(getattr(Config, "VAL_EVAL_WINDOW", 5)), 1)
         self.val_eval_buffer = []
 
         # 基于验证集的最佳模型跟踪
@@ -244,6 +249,12 @@ class EpisodeRunner:
         self.best_val_reward = float("-inf")
         self.best_val_episode = -1
         self.best_stage_name = None
+        self.best_val_save_cooldown_seconds = max(
+            float(getattr(Config, "BEST_VAL_SAVE_COOLDOWN_SECONDS", 35)),
+            0.0,
+        )
+        self.last_best_val_save_time = 0.0
+        self.pending_best_val_save = False
 
         # 训练/验证配置拆分：train 用前 80%，val 用后 20% 地图
         self.train_usr_conf, self.val_usr_conf = self._build_train_val_confs(
@@ -351,17 +362,20 @@ class EpisodeRunner:
         # 课程学习优先：按阶段直接覆盖环境参数。
         if self.curriculum_manager is not None:
             stage_name = self.curriculum_manager.current_stage_name()
-            overrides = self.curriculum_manager.build_env_overrides(is_val=is_val)
+            overrides = self.curriculum_manager.build_env_overrides(
+                is_val=is_val)
             env_conf.update(overrides)
 
             # 仅在 expert 阶段训练时叠加地图池随机化，增强泛化。
             if (not is_val) and stage_name == "expert":
                 map_pool = list(env_conf.get("map", []))
                 if self.enable_map_pool_randomization and map_pool:
-                    max_pool = min(max(1, self.map_pool_size_max), len(map_pool))
+                    max_pool = min(
+                        max(1, self.map_pool_size_max), len(map_pool))
                     min_pool = min(max(1, self.map_pool_size_min), max_pool)
                     sampled_pool_size = random.randint(min_pool, max_pool)
-                    env_conf["map"] = random.sample(map_pool, sampled_pool_size)
+                    env_conf["map"] = random.sample(
+                        map_pool, sampled_pool_size)
                     env_conf["map_random"] = True
 
                 if self.enable_monster_speed_randomization and "monster_speed" in env_conf:
@@ -369,7 +383,8 @@ class EpisodeRunner:
                     spd_max = max(1, self.monster_speed_max)
                     if spd_min > spd_max:
                         spd_min, spd_max = spd_max, spd_min
-                    env_conf["monster_speed"] = random.randint(spd_min, spd_max)
+                    env_conf["monster_speed"] = random.randint(
+                        spd_min, spd_max)
 
             self.logger.info(
                 f"[CURRICULUM {('VAL' if is_val else 'TRAIN')}] stage={stage_name} "
@@ -519,46 +534,69 @@ class EpisodeRunner:
 
         if stage_name == "easy":
             candidate = (val_completed_rate, val_steps, val_reward)
-            baseline = (self.best_val_total_score, self.best_val_steps, self.best_val_reward)
+            baseline = (self.best_val_total_score,
+                        self.best_val_steps, self.best_val_reward)
         elif stage_name == "medium":
             candidate = (val_steps, val_treasures, val_reward)
-            baseline = (self.best_val_total_score, self.best_val_steps, self.best_val_reward)
+            baseline = (self.best_val_total_score,
+                        self.best_val_steps, self.best_val_reward)
         else:
             candidate = (val_total_score, -val_terminated_rate, val_reward)
-            baseline = (self.best_val_total_score, self.best_val_steps, self.best_val_reward)
+            baseline = (self.best_val_total_score,
+                        self.best_val_steps, self.best_val_reward)
 
         improved = candidate > baseline
-        if not improved:
+        if improved:
+            self.best_val_total_score = candidate[0]
+            self.best_val_steps = candidate[1]
+            self.best_val_reward = candidate[2]
+            self.best_val_episode = self.episode_cnt
+            self.pending_best_val_save = True
+
+        if not self.pending_best_val_save:
             return
 
-        self.best_val_total_score = candidate[0]
-        self.best_val_steps = candidate[1]
-        self.best_val_reward = candidate[2]
-        self.best_val_episode = self.episode_cnt
+        now_ts = time.time()
+        if (
+            self.last_best_val_save_time > 0.0
+            and now_ts - self.last_best_val_save_time < self.best_val_save_cooldown_seconds
+        ):
+            self.logger.info(
+                f"[VAL BEST] throttled save, cooldown={self.best_val_save_cooldown_seconds:.1f}s "
+                f"elapsed={now_ts - self.last_best_val_save_time:.1f}s pending=1"
+            )
+            return
 
         try:
-            # 保留稳定别名，便于随时加载当前最优。
-            self.agent.save_model(id="best_val")
-            self.agent.save_model(id="best_model")  # 保存一个最佳前缀供长线调用
-            
+            # 仅执行一次保存，避免触发 learner 侧用户保存频次限制。
+            self.agent.save_model(id="best_model")
+
             # 为了满足业务平台提取 best_model.zip 的需求，我们可以将它额外打一个zip
             import zipfile
-            ckpt_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ckpt")
+            ckpt_dir = os.path.join(os.path.dirname(
+                os.path.dirname(__file__)), "ckpt")
             best_model_pkl = os.path.join(ckpt_dir, "best_model.pkl")
+            best_val_pkl = os.path.join(ckpt_dir, "best_val.pkl")
             # Navigate to kaiwu/train/backup_model
-            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+            root_dir = os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.dirname(__file__))))
             backup_dir = os.path.join(root_dir, "train", "backup_model")
             os.makedirs(backup_dir, exist_ok=True)
             if os.path.exists(best_model_pkl):
+                # 保留 best_val 兼容别名，便于外部按历史名称加载。
+                shutil.copy2(best_model_pkl, best_val_pkl)
                 zip_path = os.path.join(backup_dir, "best_model.zip")
                 with zipfile.ZipFile(zip_path, 'w') as zf:
                     zf.write(best_model_pkl, arcname="best_model.pkl")
-                    
+
+            self.pending_best_val_save = False
+            self.last_best_val_save_time = now_ts
+
             self.logger.info(
                 f"[VAL BEST] episode:{self.episode_cnt} stage:{stage_name} window:{self.val_eval_window} "
                 f"avg_score:{val_total_score:.1f} avg_steps:{val_steps:.1f} "
                 f"avg_completed:{val_completed_rate:.3f} avg_terminated:{val_terminated_rate:.3f} "
-                f"avg_reward:{val_reward:.3f} saved_id:best_val and best_model.zip"
+                f"avg_reward:{val_reward:.3f} saved_id:best_model + alias(best_val) + best_model.zip"
             )
         except (OSError, RuntimeError, ValueError) as err:
             self.logger.error(f"[VAL BEST] save failed: {err}")
@@ -654,6 +692,8 @@ class EpisodeRunner:
             post_step_gain = 0.0
             pre_trea_gain = 0.0
             post_trea_gain = 0.0
+            pre_buff_gain = 0.0
+            post_buff_gain = 0.0
             pre_terminal = 0.0
             post_terminal = 0.0
             post_terminated = 0.0
@@ -675,9 +715,12 @@ class EpisodeRunner:
             # 奖励诊断分项（用于调参回归）
             sum_dist_shaping = 0.0
             sum_treasure_approach = 0.0
+            sum_buff_approach = 0.0
             sum_danger_penalty = 0.0
             sum_flash_reward = 0.0
             sum_flash_penalty = 0.0
+            sum_direct_mon1_nearest = 0.0
+            sum_direct_threat_danger = 0.0
 
             self.logger.info(
                 f"[{mode_str}] total_episode:{self.episode_cnt} train_episode:{self.train_episode_cnt} "
@@ -716,6 +759,8 @@ class EpisodeRunner:
                 # 从当前/下一时刻特征提取阶段与可见性信息
                 curr_phase = self._feature_group(
                     obs_data.feature, "phase_hint")
+                curr_nearest_dyn = self._feature_group(
+                    obs_data.feature, "nearest_monster_dyn")
                 next_treasure = self._feature_group(
                     _obs_data.feature, "nearest_treasure_target")
                 next_phase = self._feature_group(
@@ -749,11 +794,16 @@ class EpisodeRunner:
                 sum_dist_shaping += float(reward_info.get("dist_shaping", 0.0))
                 sum_treasure_approach += float(
                     reward_info.get("treasure_approach", 0.0))
+                sum_buff_approach += float(
+                    reward_info.get("buff_approach", 0.0))
                 sum_danger_penalty += float(
                     reward_info.get("danger_penalty", 0.0))
                 sum_flash_reward += float(reward_info.get("flash_reward", 0.0))
                 sum_flash_penalty += float(
                     reward_info.get("flash_penalty", 0.0))
+                # 最近威胁直连特征监控（nearest_monster_dyn）
+                sum_direct_mon1_nearest += float(curr_nearest_dyn[0])
+                sum_direct_threat_danger += float(curr_nearest_dyn[3])
 
                 total_reward += float(reward[0])
 
@@ -767,6 +817,7 @@ class EpisodeRunner:
                 shaped_r = (
                     float(reward_info.get("dist_shaping", 0.0))
                     + float(reward_info.get("treasure_approach", 0.0))
+                    + float(reward_info.get("buff_approach", 0.0))
                     + float(reward_info.get("danger_penalty", 0.0))
                     + float(reward_info.get("double_pressure_penalty", 0.0))
                     + float(reward_info.get("flash_reward", 0.0))
@@ -776,14 +827,17 @@ class EpisodeRunner:
 
                 step_gain = float(reward_info.get("step_gain", 0.0))
                 trea_gain = float(reward_info.get("treasure_gain", 0.0))
+                buff_gain = float(reward_info.get("buff_gain", 0.0))
                 if post_speedup > 0.5:
                     post_shaped_r += shaped_r
                     post_step_gain += step_gain
                     post_trea_gain += trea_gain
+                    post_buff_gain += buff_gain
                 else:
                     pre_shaped_r += shaped_r
                     pre_step_gain += step_gain
                     pre_trea_gain += trea_gain
+                    pre_buff_gain += buff_gain
 
                 # 记录末帧危险度与最近宝箱距离
                 min_monster_dist = float(
@@ -910,8 +964,10 @@ class EpisodeRunner:
                         "post_step_gain": round(post_step_gain, 4),
                         "pre_trea_gain": round(pre_trea_gain, 4),
                         "post_trea_gain": round(post_trea_gain, 4),
-                        "pre_total_gain": round(pre_step_gain + pre_trea_gain, 4),
-                        "post_total_gain": round(post_step_gain + post_trea_gain, 4),
+                        "pre_buff_gain": round(pre_buff_gain, 4),
+                        "post_buff_gain": round(post_buff_gain, 4),
+                        "pre_total_gain": round(pre_step_gain + pre_trea_gain + pre_buff_gain, 4),
+                        "post_total_gain": round(post_step_gain + post_trea_gain + post_buff_gain, 4),
                         "pre_terminal": round(pre_terminal, 4),
                         "post_terminal": round(post_terminal, 4),
                         "post_terminated": round(post_terminated, 4),
@@ -927,9 +983,12 @@ class EpisodeRunner:
                         "final_visible_tre": round(final_visible_tre, 4),
                         "dist_shaping_mean": round(sum_dist_shaping / max(step, 1), 4),
                         "treasure_approach_mean": round(sum_treasure_approach / max(step, 1), 4),
+                        "buff_approach_mean": round(sum_buff_approach / max(step, 1), 4),
                         "danger_penalty_mean": round(sum_danger_penalty / max(step, 1), 4),
                         "flash_reward_mean": round(sum_flash_reward / max(step, 1), 4),
                         "flash_penalty_mean": round(sum_flash_penalty / max(step, 1), 4),
+                        "direct_mon1_nearest_mean": round(sum_direct_mon1_nearest / max(step, 1), 4),
+                        "direct_threat_danger_mean": round(sum_direct_threat_danger / max(step, 1), 4),
                         "attn_mon1": round(attn_mon1, 4),
                         "attn_mon2": round(attn_mon2, 4),
                         "attn_resource": round(attn_resource, 4),
@@ -958,7 +1017,8 @@ class EpisodeRunner:
 
                     # 验证局使用滑动均值评估，并驱动课程晋级。
                     if is_val:
-                        avg_val_metrics = self._aggregate_val_metrics(episode_metrics)
+                        avg_val_metrics = self._aggregate_val_metrics(
+                            episode_metrics)
                         if avg_val_metrics is not None:
                             self._try_save_best_val_model(avg_val_metrics)
                             self._try_promote_curriculum(avg_val_metrics)

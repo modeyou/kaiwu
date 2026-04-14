@@ -51,6 +51,12 @@ class Algorithm:
         self.var_beta = self.beta_start
         self.vf_coef = Config.VF_COEF
         self.clip_param = Config.CLIP_PARAM
+        self.value_clip_param = float(
+            getattr(Config, "VALUE_CLIP_PARAM", self.clip_param)
+        )
+        self.enable_value_target_norm = bool(
+            getattr(Config, "ENABLE_VALUE_TARGET_NORM", False)
+        )
 
         self.last_report_monitor_time = 0
         self.train_step = 0
@@ -118,6 +124,7 @@ class Algorithm:
                 "explained_var": round(info_list["explained_var"].item(), 4),
                 "adv_mean": round(advantage.mean().item(), 4),
                 "ret_mean": round(reward_sum.mean().item(), 4),
+                "ret_std": round(info_list["ret_std"].item(), 4),
             }
             self.logger.info(
                 f"[train] cum_reward:{results['cum_reward']} "
@@ -159,7 +166,8 @@ class Algorithm:
         old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp(1e-9)
         ratio = new_prob / old_action_prob
         adv = advantage.view(-1, 1)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)  # 标准 PPO 稳定训练的关键
+        adv = (adv - adv.mean()) / \
+            (adv.std(unbiased=False) + 1e-8)  # 标准 PPO 稳定训练的关键
         clip_mask = (ratio > (1 + self.clip_param)
                      ) | (ratio < (1 - self.clip_param))
         clip_frac = clip_mask.float().mean()
@@ -169,15 +177,31 @@ class Algorithm:
         policy_loss = torch.maximum(policy_loss1, policy_loss2).mean()
 
         # Value loss (Clipped) / 价值损失
-        vp = value_pred
-        ov = old_value
-        tdret = reward_sum
-        value_clip = ov + (vp - ov).clamp(-self.clip_param, self.clip_param)
+        vp = value_pred.view(-1, self.value_num)
+        ov = old_value.view_as(vp)
+        tdret = reward_sum.view_as(vp)
+
+        if self.enable_value_target_norm:
+            ret_mean = tdret.mean(dim=0, keepdim=True)
+            ret_std = tdret.std(dim=0, unbiased=False,
+                                keepdim=True).clamp_min(1e-6)
+            vp_loss = (vp - ret_mean) / ret_std
+            ov_loss = (ov - ret_mean) / ret_std
+            tdret_loss = (tdret - ret_mean) / ret_std
+        else:
+            ret_std = tdret.std(dim=0, unbiased=False, keepdim=True)
+            vp_loss = vp
+            ov_loss = ov
+            tdret_loss = tdret
+
+        value_clip = ov_loss + (vp_loss - ov_loss).clamp(
+            -self.value_clip_param, self.value_clip_param
+        )
         value_loss = (
             0.5
             * torch.maximum(
-                torch.square(tdret - vp),
-                torch.square(tdret - value_clip),
+                torch.square(tdret_loss - vp_loss),
+                torch.square(tdret_loss - value_clip),
             ).mean()
         )
 
@@ -200,6 +224,7 @@ class Algorithm:
             "entropy_loss": entropy_loss,
             "clip_frac": clip_frac,
             "explained_var": explained_var,
+            "ret_std": ret_std.mean(),
         }
 
     def _masked_softmax(self, logits, legal_action):

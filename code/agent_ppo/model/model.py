@@ -114,13 +114,17 @@ class Model(nn.Module):
         self.attention = EntityAttention(embed_dim=embed)
 
         self.backbone = nn.Sequential(
-            make_fc(embed * 2, 128), nn.LayerNorm(128), nn.ReLU(),
+            make_fc(embed * 3, 128), nn.LayerNorm(128), nn.ReLU(),
             ResidualBlock(128),
             make_fc(128, 64), nn.LayerNorm(64), nn.ReLU(),
         )
 
         self.actor_head = make_fc(64, Config.ACTION_NUM, gain=0.01)
-        self.critic_head = make_fc(64, Config.VALUE_NUM, gain=1.0)
+        self.critic_feature = nn.Sequential(
+            make_fc(64, 64), nn.LayerNorm(64), nn.ReLU(),
+            make_fc(64, 32), nn.ReLU(),
+        )
+        self.critic_head = make_fc(32, Config.VALUE_NUM, gain=1.0)
 
         self._last_attn_weights = None
 
@@ -159,10 +163,12 @@ class Model(nn.Module):
         )
         self._last_attn_weights = attn_weights.detach()
 
-        fused = torch.cat([hero_enc, context], dim=1)
+        # Keep a direct path for nearest threat to avoid attention over-smoothing.
+        fused = torch.cat([hero_enc, context, mon1_enc], dim=1)
         hidden = self.backbone(fused)
         logits = self.actor_head(hidden)
-        value = self.critic_head(hidden)
+        value_hidden = self.critic_feature(hidden)
+        value = self.critic_head(value_hidden)
         return logits, value
 
     def set_train_mode(self):
