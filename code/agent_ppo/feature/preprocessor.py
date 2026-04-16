@@ -253,7 +253,7 @@ class Preprocessor:
                         return value
                 except (TypeError, ValueError):
                     pass
-        return 500.0
+        return 700.0
 
     def feature_process(self, env_obs, _last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.

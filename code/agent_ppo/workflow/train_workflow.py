@@ -81,7 +81,7 @@ class CurriculumManager:
                 "buff_cooldown": (100, 150),
                 "monster_interval": (300, 500),  # 一开始就学习双拐
                 "monster_speedup": (2000, 2000),
-                "max_step": 700,   # 500
+                "max_step": 1000,   # 500
             },
             "medium": {
                 "treasure_count": (8, 10),
@@ -89,7 +89,7 @@ class CurriculumManager:
                 "buff_cooldown": (100, 200),
                 "monster_interval": (250, 400),
                 "monster_speedup": (400, 600),
-                "max_step": 900,
+                "max_step": 1000,
             },
             "hard": {
                 "treasure_count": (7, 9),
@@ -97,7 +97,7 @@ class CurriculumManager:
                 "buff_cooldown": (100, 200),
                 "monster_interval": (200, 450),
                 "monster_speedup": (350, 550),
-                "max_step": 1000,
+                "max_step": 2000,
             },
             "expert": {
                 "treasure_count": (6, 10),
@@ -105,7 +105,7 @@ class CurriculumManager:
                 "buff_cooldown": (80, 120),
                 "monster_interval": (150, 600),
                 "monster_speedup": (250, 600),
-                "max_step": 1000,
+                "max_step": 2000,
             },
         }
 
@@ -136,8 +136,8 @@ class CurriculumManager:
     def _promotion_condition(self, stage_name, val_metrics):
         if stage_name == "easy":
             return (
-                float(val_metrics.get("completed_rate", 0.0))
-                >= float(getattr(Config, "CURRICULUM_EASY_PROMOTE_COMPLETED_RATE", 0.30))
+                float(val_metrics.get("steps", 0.0))
+                >= float(getattr(Config, "CURRICULUM_EASY_PROMOTE_STEPS", 500.0))
             )
 
         if stage_name == "medium":
