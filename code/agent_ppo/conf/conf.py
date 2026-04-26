@@ -13,9 +13,9 @@ Configuration for Gorge Chase PPO.
 
 class Config:
 
-    # Feature dimensions / 特征维度（共147维）
+    # Feature dimensions / 特征维度（共155维）
     FEATURES = [
-        4,   # hero_self
+        12,  # hero_self (4 + 8_escape_depth)
         13,  # monster_1
         13,  # monster_2
         81,  # map_local（9x9）
@@ -32,17 +32,17 @@ class Config:
     DIM_OF_OBSERVATION = FEATURE_LEN
 
     # Feature slice indices / 特征切片索引（左闭右开）
-    IDX_HERO = (0, 4)
-    IDX_MON1 = (4, 17)
-    IDX_MON2 = (17, 30)
-    IDX_MAP = (30, 111)
-    IDX_LEGAL = (111, 127)
-    IDX_PROGRESS = (127, 129)
-    IDX_DYN1 = (129, 133)
-    IDX_DYN2 = (133, 137)
-    IDX_TREA = (137, 141)
-    IDX_BUFF = (141, 145)
-    IDX_PHASE = (145, 147)
+    IDX_HERO = (0, 12)
+    IDX_MON1 = (12, 25)
+    IDX_MON2 = (25, 38)
+    IDX_MAP = (38, 119)
+    IDX_LEGAL = (119, 135)
+    IDX_PROGRESS = (135, 137)
+    IDX_DYN1 = (137, 141)
+    IDX_DYN2 = (141, 145)
+    IDX_TREA = (145, 149)
+    IDX_BUFF = (149, 153)
+    IDX_PHASE = (153, 155)
 
     # Action space / 动作空间：8个移动方向+8个闪现
     ACTION_NUM = 16
@@ -51,8 +51,8 @@ class Config:
     VALUE_NUM = 1
 
     # PPO hyperparameters / PPO 超参数
-    GAMMA = 0.99
-    LAMDA = 0.9
+    GAMMA = 0.995
+    LAMDA = 0.95
     INIT_LEARNING_RATE_START = 0.0003
     INIT_LEARNING_RATE_END = 0.00003
     ENABLE_LR_DECAY = True
@@ -80,48 +80,55 @@ class Config:
     SCORE_BUFF_WEIGHT_POST = 0.3
 
     # 基础生存奖励
-    SURVIVE_REWARD_PRE = 0.02
-    SURVIVE_REWARD_POST = 0.1
+    SURVIVE_REWARD_PRE = 0.3
+    SURVIVE_REWARD_POST = 0.8
 
     # 怪物距离塑形（后期更重）
     DIST_SHAPING_WEIGHT_PRE = 0.15
-    DIST_SHAPING_WEIGHT_POST = 0.35
+    DIST_SHAPING_WEIGHT_POST = 0.07
     DIST_DELTA_CLIP = 2.0
 
     # 宝箱接近塑形（后期弱化，避免贪箱送死）
     TREASURE_APPROACH_WEIGHT_PRE = 0.15
-    TREASURE_APPROACH_WEIGHT_POST = 0.06
+    TREASURE_APPROACH_WEIGHT_POST = 0.04
     TREASURE_APPROACH_DELTA_CLIP = 2.0
 
     # buff 接近塑形（与宝箱同级设置）
     BUFF_APPROACH_WEIGHT_PRE = 0.15
-    BUFF_APPROACH_WEIGHT_POST = 0.1
+    BUFF_APPROACH_WEIGHT_POST = 0.04
     BUFF_APPROACH_DELTA_CLIP = 2.0
 
     # 风险阈值与惩罚
-    DANGER_DIST_THRESHOLD = 4.0
+    DANGER_DIST_THRESHOLD = 5.0
     HIGH_DANGER_DIST_THRESHOLD = 1.5
     DOUBLE_PRESSURE_DIST_THRESHOLD = 5.0
     HIGH_DANGER_PENALTY_PRE = 0.05
     HIGH_DANGER_PENALTY_POST = 0.15
-    DOUBLE_PRESSURE_PENALTY_POST = 0.4
+    DOUBLE_PRESSURE_PENALTY_POST = 0.1
 
     # 闪现价值奖励（奖励“用得值”）
-    FLASH_ESCAPE_MIN_GAIN = 0.8
+    FLASH_ESCAPE_MIN_GAIN = 0.5
     FLASH_ESCAPE_REWARD_PRE = 1.2
-    FLASH_ESCAPE_REWARD_POST = 1.5
+    FLASH_ESCAPE_REWARD_POST = 1.7
     FLASH_CRITICAL_DANGER_DIST_THRESHOLD = 2.0
     FLASH_CRITICAL_DANGER_USE_REWARD = 0.3
     FLASH_TREASURE_GAIN_REWARD = 0.4
     FLASH_WASTE_PENALTY = 0.08
 
+    # 逃跑方向奖励：危险时朝远离怪物方向移动给正反馈
+    FLEE_DIRECTION_REWARD = 0.08
+    FLEE_DANGER_THRESHOLD = 8.0
+
+    # 闪现冷却归一化上限（与评估 talent_cooldown 对齐）
+    MAX_FLASH_CD_FOR_NORM = 200.0
+
     # 无效位移惩罚（轻惩罚，防止撞墙抖动）
-    INVALID_MOVE_PENALTY = 0.01
+    INVALID_MOVE_PENALTY = 0.06
 
     # 终局奖励（替代原始 ±10，避免掩盖过程目标）
     TERMINAL_FAIL_PRE = -1.0
-    TERMINAL_FAIL_POST = -1.5
-    TERMINAL_COMPLETE = 1.2
+    TERMINAL_FAIL_POST = -2.5
+    TERMINAL_COMPLETE = 2.5
     TERMINAL_ABNORMAL = -1.0
 
     # 单步奖励裁剪，增强训练稳定性
@@ -137,10 +144,10 @@ class Config:
     ENABLE_CURRICULUM_LEARNING = True
     CURRICULUM_WARMUP_EPISODES = 100      # 大幅降低热身局数，短训练必须迅速出村
     CURRICULUM_PROMOTION_WINDOW = 8      # 连续满足8次验证窗口再晋级
-    CURRICULUM_EASY_PROMOTE_STEPS = 500.0
-    CURRICULUM_MEDIUM_PROMOTE_STEPS = 700.0  # 700
-    CURRICULUM_MEDIUM_PROMOTE_TREASURES = 3.5  # 3.5
-    CURRICULUM_HARD_PROMOTE_TOTAL_SCORE = 1500.0  # 1500
+    CURRICULUM_EASY_PROMOTE_STEPS = 350.0
+    CURRICULUM_MEDIUM_PROMOTE_STEPS = 420.0  # 700
+    CURRICULUM_MEDIUM_PROMOTE_TREASURES = 2.5  # 3.5
+    CURRICULUM_HARD_PROMOTE_TOTAL_SCORE = 1000.0  # 1500
     # CURRICULUM_HARD_PROMOTE_TERMINATED_RATE = 0.5 #
 
     # 受限域随机化：围绕基础配置做小范围随机抖动（仅训练局启用）

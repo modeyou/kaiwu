@@ -96,7 +96,7 @@ class Model(nn.Module):
         embed = 32
 
         self.hero_encoder = nn.Sequential(
-            make_fc(8, 64), nn.LayerNorm(64), nn.ReLU(),
+            make_fc(16, 64), nn.LayerNorm(64), nn.ReLU(),
             make_fc(64, embed), nn.ReLU(),
         )
 

@@ -20,7 +20,7 @@ MAX_MONSTER_SPEED = 5.0
 # Max distance bucket / 距离桶最大值
 MAX_DIST_BUCKET = 5.0
 # Max flash cooldown / 最大闪现冷却步数
-MAX_FLASH_CD = 2000.0
+MAX_FLASH_CD = 200.0
 # Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
 # Map diagonal distance / 地图对角线长度
@@ -271,7 +271,7 @@ class Preprocessor:
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
 
-        # Hero self features (4D) / 英雄自身特征
+        # Hero self features (4D + 8D) / 英雄自身特征 + 逃脱深度
         hero = frame_state["heroes"]
         hero_pos = hero["pos"]
         hero_x_norm = _norm(hero_pos["x"], MAP_SIZE)
@@ -284,11 +284,33 @@ class Preprocessor:
         buff_remain_raw = hero.get(
             "buff_remaining_time", env_info.get("buff_remaining_time", 0.0)
         )
-        flash_cd_norm = _norm(flash_cd_raw, MAX_FLASH_CD)
+        flash_cd_norm = min(
+            float(flash_cd_raw) / float(Config.MAX_FLASH_CD_FOR_NORM), 1.0
+        )
         buff_remain_norm = _norm(buff_remain_raw, MAX_BUFF_DURATION)
 
-        hero_feat = np.array(
+        escape_depths = np.zeros(8, dtype=np.float32)
+        if map_info is not None and len(map_info) >= 9:
+            center_r, center_c = len(map_info) // 2, len(map_info[0]) // 2
+            # 上，下，左，右，左上，右上，左下，右下
+            dirs = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+            for i, (dr, dc) in enumerate(dirs):
+                depth = 0
+                for d in range(1, 5):
+                    r = center_r + dr * d
+                    c = center_c + dc * d
+                    if 0 <= r < len(map_info) and 0 <= c < len(map_info[0]):
+                        if map_info[r][c] == 0:
+                            depth = d
+                        else:
+                            break
+                    else:
+                        break
+                escape_depths[i] = depth / 4.0
+
+        hero_base = np.array(
             [hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
+        hero_feat = np.concatenate([hero_base, escape_depths])
 
         # Monster features (5D x 2) / 怪物特征
         monsters = frame_state.get("monsters", [])
@@ -630,6 +652,12 @@ class Preprocessor:
                 flash_reward += Config.FLASH_TREASURE_GAIN_REWARD
             if (not escaped) and step_gain <= 0.0 and treasure_gain <= 0.0:
                 flash_penalty -= flash_waste_penalty
+            # 闪现后离怪更近，说明闪现方向错误（闪向怪物）。
+            if cur_min_monster_raw_dist < (prev_min_monster_raw_dist - 1.0):
+                wrong_dir_penalty = 0.3 * (
+                    prev_min_monster_raw_dist - cur_min_monster_raw_dist
+                ) / MAP_DIAG
+                flash_penalty -= float(wrong_dir_penalty)
 
         # 8) 无效移动惩罚：减少原地抖动/撞墙行为
         invalid_move_penalty = 0.0
@@ -639,6 +667,36 @@ class Preprocessor:
             moved = float(np.sqrt(dx * dx + dz * dz))
             if moved < 0.1:
                 invalid_move_penalty = -Config.INVALID_MOVE_PENALTY
+
+        # 9) 逃跑方向奖励：危险距离内，奖励朝远离怪物方向移动。
+        flee_dir_reward = 0.0
+        if (
+            _last_action is not None
+            and 0 <= int(_last_action) < 8
+            and self.prev_hero_pos is not None
+            and cur_min_monster_raw_dist <= Config.FLEE_DANGER_THRESHOLD
+            and valid_dists
+        ):
+            hero_dx = float(hero_pos["x"] - self.prev_hero_pos[0])
+            hero_dz = float(hero_pos["z"] - self.prev_hero_pos[1])
+            moved = float(np.sqrt(hero_dx ** 2 + hero_dz ** 2))
+
+            if moved > 0.5:
+                nearest_idx = int(np.argmin(
+                    [d if d is not None else 9999.0 for d in self.prev_monster_raw_dists]
+                ))
+                if nearest_idx < len(monsters) and monsters[nearest_idx]:
+                    m_pos = monsters[nearest_idx]["pos"]
+                    to_monster_dx = float(m_pos["x"] - self.prev_hero_pos[0])
+                    to_monster_dz = float(m_pos["z"] - self.prev_hero_pos[1])
+                    m_dist = float(
+                        np.sqrt(to_monster_dx ** 2 + to_monster_dz ** 2) + 1e-6)
+                    # align > 0：朝远离怪物方向移动；< 0：朝怪物移动
+                    align = -(hero_dx * to_monster_dx + hero_dz *
+                              to_monster_dz) / (moved * m_dist)
+                    if align > 0.2:
+                        flee_dir_reward = Config.FLEE_DIRECTION_REWARD * \
+                            float(align)
 
         total_reward = (
             score_reward
@@ -651,6 +709,7 @@ class Preprocessor:
             + flash_reward
             + flash_penalty
             + invalid_move_penalty
+            + flee_dir_reward
         )
         total_reward = float(
             np.clip(total_reward, Config.REWARD_CLIP_MIN, Config.REWARD_CLIP_MAX))
@@ -670,6 +729,7 @@ class Preprocessor:
             "flash_reward": float(flash_reward),
             "flash_penalty": float(flash_penalty),
             "invalid_move_penalty": float(invalid_move_penalty),
+            "flee_dir_reward": float(flee_dir_reward),
             "is_post": float(is_post),
             "min_monster_dist": float(cur_min_monster_raw_dist),
             "nearest_treasure_dist": float(nearest_treasure_raw_dist)

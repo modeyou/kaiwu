@@ -78,34 +78,34 @@ class CurriculumManager:
             "easy": {
                 "treasure_count": (9, 10),
                 "buff_count": (2, 2),
-                "buff_cooldown": (100, 150),
-                "monster_interval": (300, 500),  # 一开始就学习双拐
-                "monster_speedup": (2000, 2000),
+                "buff_cooldown": (150, 200),
+                "monster_interval": (250, 350),  # 一开始就学习双拐
+                "monster_speedup": (320, 450),
                 "max_step": 1000,   # 500
             },
             "medium": {
                 "treasure_count": (8, 10),
                 "buff_count": (1, 2),
-                "buff_cooldown": (100, 200),
-                "monster_interval": (250, 400),
-                "monster_speedup": (400, 600),
+                "buff_cooldown": (150, 200),
+                "monster_interval": (180, 280),
+                "monster_speedup": (280, 420) ,
                 "max_step": 1000,
             },
             "hard": {
-                "treasure_count": (7, 9),
+                "treasure_count": (7, 10),
                 "buff_count": (1, 2),
-                "buff_cooldown": (100, 200),
-                "monster_interval": (200, 450),
-                "monster_speedup": (350, 550),
-                "max_step": 2000,
+                "buff_cooldown": (150, 200),
+                "monster_interval": (150, 250),
+                "monster_speedup": (250, 380),
+                "max_step": 1000,
             },
             "expert": {
                 "treasure_count": (6, 10),
                 "buff_count": (1, 2),
-                "buff_cooldown": (80, 120),
-                "monster_interval": (150, 600),
-                "monster_speedup": (250, 600),
-                "max_step": 2000,
+                "buff_cooldown": (150, 220),
+                "monster_interval": (130, 300),
+                "monster_speedup": (220, 400),
+                "max_step": 1000,
             },
         }
 
